@@ -14,7 +14,7 @@ Questions:
 
 4.  There will be a libs/volatility.py  module.  This will start with one volatility function simple_vol which computes the daily return (ie today's cose/yesterday's close -1) and compute the trailing N-day standard deviation.  N is a parameter which should be partialed out -- so that simople_vol(20) means 20-day std-dev of 1-day returns
 
-5. Implement the module signals/technical.py with a function SMA that computes the N-day simple moving average over N days.  Use decorators so that I can refer to SMA(200) to compute a 200-day moving average.  The signal output should be NaN for the first N days since there is noit enough data to compute the SMA.
+5. Implement the module signals/technical.py with a function SMA that computes the N-day simple moving average over N days.  Use decorators so that I can refer to SMA(200) to compute a 200-day moving average.  The signal output should be NaN for the first N days since there is not enough data to compute the SMA.
 
 6. base_strategy.py should exclude the period corresponding to the initial string of NaNs in the signal (some signals have a warm-up period).  If there are NaNs in the middle of the signal series the strategy should fail.  It should create an err file in teh currenyt directory.  The err file should say that there were NaNs in the moddl of the signal (name the signal function).  It should describe how many such NaNs and list the dates.
 
@@ -25,4 +25,6 @@ Questions:
 9.  Implement a libs/performance.py module.  There should be a function stats(pnl_series) which should take the onl series as input and output a dictionary sharpe, total pnl, number of tradesa and mean pnl per trade
 
 10. Create a backtest script with a __main__ program.  It should take optional args start_date (default=2010-01-01) and end_date (today).  the symbol will be given as argument.  It should run a backtest using the 200-dma strategy and neatly format the performance ad display on stad out.  Rmove all the demo/ecxampl files from scripts
+
+11. Create a document DESIGN.md that describes the design and the main workflow (the sequence of method calls to get the work done).
 
