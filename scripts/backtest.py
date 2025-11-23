@@ -25,6 +25,7 @@ import logging
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from strategies.dma import DMA
+from strategies.vol_normalized_buy_and_hold import VolNormalizedBuyAndHold
 from libs.backtester import Backtester
 
 
@@ -115,6 +116,104 @@ def validate_date(date_string):
         return False
 
 
+def display_performance_table(backtester, bnh_backtester):
+    """
+    Display performance metrics in a neat comparative table.
+
+    Args:
+        backtester: DMA Backtester instance with completed backtest
+        bnh_backtester: Buy & Hold Backtester instance with completed backtest
+    """
+    unslipped = backtester.unslipped_performance
+    slipped = backtester.slipped_performance
+    bnh = bnh_backtester.slipped_performance
+
+    # Define the metrics to display
+    # Split into two groups: with and without trade-related metrics
+    all_metrics = [
+        ('Sharpe Ratio', 'sharpe', '.3f', False),
+        ('Total PnL', 'total_pnl', ',.2f', False),
+        ('Number of Trades', 'num_trades', ',.0f', True),
+        ('Mean PnL per Trade', 'mean_pnl_per_trade', ',.2f', True),
+        ('#Wins', 'num_wins', ',.0f', True),
+        ('Average PnL/Win', 'avg_pnl_win', ',.2f', True),
+        ('Days Held (Wins)', 'days_held_wins', '.1f', True),
+        ('#Losses', 'num_losses', ',.0f', True),
+        ('Average PnL/Loss', 'avg_pnl_loss', ',.2f', True),
+        ('Days Held (Loss)', 'days_held_losses', '.1f', True),
+        ('Max Drawdown', 'max_drawdown', ',.2f', False),
+        ('Drawdown #2', 'drawdown_2', ',.2f', False),
+        ('Drawdown #3', 'drawdown_3', ',.2f', False),
+    ]
+
+    # Calculate column widths
+    metric_width = max(len(m[0]) for m in all_metrics) + 2
+    value_width = 18
+
+    # Print header
+    print("=" * 100)
+    print(f"PERFORMANCE COMPARISON: {backtester.symbol}")
+    print(f"Period: {backtester.start_date} to {backtester.end_date}")
+    print(f"Dollar Size: ${backtester.dollar_size:,.2f} | Slippage: {backtester.slippage_bps} bps")
+    print("=" * 100)
+    print()
+
+    # Print table header
+    header = f"{'Metric':<{metric_width}} {'Unslipped':>{value_width}} {'Slipped':>{value_width}} {'Buy & Hold':>{value_width}}"
+    print(header)
+    print("-" * len(header))
+
+    # Print each metric
+    for label, key, fmt, is_trade_metric in all_metrics:
+        unslipped_val = unslipped.get(key, 0)
+        slipped_val = slipped.get(key, 0)
+        bnh_val = bnh.get(key, 0)
+
+        # Format values based on the format string
+        if 'f' in fmt:
+            # Numeric formatting
+            if key in ['total_pnl', 'mean_pnl_per_trade', 'avg_pnl_win', 'avg_pnl_loss',
+                       'max_drawdown', 'drawdown_2', 'drawdown_3']:
+                # Dollar amounts
+                unslipped_str = f"${unslipped_val:{fmt}}"
+                slipped_str = f"${slipped_val:{fmt}}"
+                bnh_str = f"${bnh_val:{fmt}}" if not is_trade_metric else "-"
+            else:
+                # Non-dollar amounts
+                unslipped_str = f"{unslipped_val:{fmt}}"
+                slipped_str = f"{slipped_val:{fmt}}"
+                bnh_str = f"{bnh_val:{fmt}}" if not is_trade_metric else "-"
+        else:
+            unslipped_str = str(unslipped_val)
+            slipped_str = str(slipped_val)
+            bnh_str = str(bnh_val) if not is_trade_metric else "-"
+
+        print(f"{label:<{metric_width}} {unslipped_str:>{value_width}} {slipped_str:>{value_width}} {bnh_str:>{value_width}}")
+
+    print("=" * 100)
+
+    # Print comparison summary
+    print()
+    print("STRATEGY COMPARISON (Slipped DMA vs Buy & Hold):")
+    print("-" * 100)
+
+    pnl_diff = slipped['total_pnl'] - bnh['total_pnl']
+    pnl_diff_pct = (pnl_diff / abs(bnh['total_pnl']) * 100) if bnh['total_pnl'] != 0 else 0
+    sharpe_diff = slipped['sharpe'] - bnh['sharpe']
+
+    print(f"  PnL Difference:     ${pnl_diff:+,.2f} ({pnl_diff_pct:+.2f}%)")
+    print(f"  Sharpe Difference:  {sharpe_diff:+.3f}")
+
+    if pnl_diff > 0:
+        print(f"  → DMA outperformed Buy & Hold")
+    elif pnl_diff < 0:
+        print(f"  → Buy & Hold outperformed DMA")
+    else:
+        print(f"  → Identical performance")
+
+    print("=" * 100)
+
+
 def main():
     """
     Main function to run the backtest.
@@ -154,14 +253,14 @@ def main():
     print()
 
     try:
-        # Create strategy instance
+        # Create DMA strategy instance
         strategy = DMA(lookback=args.lookback)
 
         # Create backtester instance
         backtester = Backtester(strategy, dollar_size=args.dollar_size)
 
-        # Run backtest
-        print("Running backtest...")
+        # Run DMA backtest
+        print("Running DMA backtest...")
         backtester(
             symbol=args.symbol,
             start_date=args.start_date,
@@ -173,7 +272,7 @@ def main():
         if backtester.slipped_performance is None:
             print()
             print("=" * 80)
-            print("ERROR: Backtest failed")
+            print("ERROR: DMA backtest failed")
             print("=" * 80)
             print()
             print("Possible reasons:")
@@ -183,54 +282,36 @@ def main():
             print()
             sys.exit(1)
 
-        # Display results
-        print()
-        print(backtester.get_summary())
-        print()
+        # Run Buy & Hold backtest for comparison
+        print("Running Buy & Hold backtest...")
+        bnh_strategy = VolNormalizedBuyAndHold()
+        bnh_backtester = Backtester(bnh_strategy, dollar_size=args.dollar_size)
+        bnh_backtester(
+            symbol=args.symbol,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            slippage_bps=args.slippage
+        )
 
-        # Display additional statistics
-        df = backtester.get_dataframe()
-        if df is not None:
-            print("ADDITIONAL STATISTICS:")
-            print("-" * 80)
-
-            # Position statistics
-            long_days = (df['Position'] == 1).sum()
-            flat_days = (df['Position'] == 0).sum()
-            total_days = len(df)
-
-            print(f"Total Trading Days:     {total_days:,}")
-            print(f"Long Days:              {long_days:,} ({100*long_days/total_days:.1f}%)")
-            print(f"Flat Days:              {flat_days:,} ({100*flat_days/total_days:.1f}%)")
-
-            # PnL statistics
-            winning_days = (df['Slipped_PnL'] > 0).sum()
-            losing_days = (df['Slipped_PnL'] < 0).sum()
-            win_rate = (winning_days / (winning_days + losing_days) * 100) if (winning_days + losing_days) > 0 else 0
-
-            print(f"\nWinning Days:           {winning_days:,}")
-            print(f"Losing Days:            {losing_days:,}")
-            print(f"Win Rate:               {win_rate:.1f}%")
-
-            # Return statistics
-            avg_win = df[df['Slipped_PnL'] > 0]['Slipped_PnL'].mean() if winning_days > 0 else 0
-            avg_loss = df[df['Slipped_PnL'] < 0]['Slipped_PnL'].mean() if losing_days > 0 else 0
-
-            print(f"\nAverage Win:            ${avg_win:,.2f}")
-            print(f"Average Loss:           ${avg_loss:,.2f}")
-            if avg_loss != 0:
-                print(f"Win/Loss Ratio:         {abs(avg_win/avg_loss):.2f}")
-
-            # Drawdown
-            cumulative_pnl = df['Cumulative_Slipped_PnL']
-            running_max = cumulative_pnl.cummax()
-            drawdown = cumulative_pnl - running_max
-            max_drawdown = drawdown.min()
-
-            print(f"\nMax Drawdown:           ${max_drawdown:,.2f}")
-
-            print("=" * 80)
+        if bnh_backtester.slipped_performance is None:
             print()
+            print("WARNING: Buy & Hold backtest failed, showing DMA results only")
+            print()
+            # Fall back to single-strategy display (would need original function)
+            sys.exit(1)
+
+        # Display results in a neat comparative table
+        print()
+        display_performance_table(backtester, bnh_backtester)
+        print()
+
+        # Create visualization with Buy & Hold comparison
+        strategy_name = args.lookback
+        output_filename = f"output/{args.symbol}-{strategy_name}dma.png"
+        print(f"Saving visualization to {output_filename}...")
+        backtester.visualize(output_filename, bnh_backtester=bnh_backtester)
+        print(f"Visualization saved successfully!")
+        print()
 
     except KeyboardInterrupt:
         print()

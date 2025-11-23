@@ -2,11 +2,12 @@
 Technical Indicators Module
 
 This module provides technical indicator functions for use in trading strategies.
-All indicators use a decorator pattern to allow for easy parameterization.
+All indicators use a factory pattern to allow for easy parameterization.
+The returned functions now take symbol and price series as arguments.
 
 Example:
     >>> sma_200 = SMA(200)
-    >>> ma = sma_200(prices['Close'])
+    >>> ma = sma_200('AAPL', prices['Close'])
 """
 
 import pandas as pd
@@ -26,23 +27,24 @@ def SMA(N):
         N (int): The number of periods for the moving average
 
     Returns:
-        callable: A function that takes a pandas Series and returns the N-day SMA
+        callable: A function that takes symbol and pandas Series and returns the N-day SMA
 
     Example:
         >>> # Create a 200-day SMA calculator
         >>> sma_200 = SMA(200)
         >>>
         >>> # Apply it to price data
-        >>> df['MA_200'] = sma_200(df['Close'])
+        >>> df['MA_200'] = sma_200('AAPL', df['Close'])
         >>>
         >>> # Or use inline
-        >>> df['MA_50'] = SMA(50)(df['Close'])
+        >>> df['MA_50'] = SMA(50)('AAPL', df['Close'])
     """
-    def compute_sma(series):
+    def compute_sma(symbol, series):
         """
         Compute the N-day simple moving average.
 
         Args:
+            symbol (str): Stock ticker symbol (e.g., 'AAPL')
             series (pd.Series): Time series data (typically price data)
 
         Returns:
@@ -52,7 +54,7 @@ def SMA(N):
             raise TypeError(f"Expected pandas Series, got {type(series)}")
 
         result = series.rolling(window=N).mean()
-        logger.debug(f"Computed {N}-day SMA with {len(result)} data points")
+        logger.debug(f"Computed {N}-day SMA for {symbol} with {len(result)} data points")
 
         return result
 
@@ -61,6 +63,7 @@ def SMA(N):
     compute_sma.__doc__ = f"""Compute {N}-day Simple Moving Average.
 
     Args:
+        symbol (str): Stock ticker symbol
         series (pd.Series): Time series data
 
     Returns:
@@ -83,20 +86,21 @@ def EMA(N):
         N (int): The number of periods for the moving average
 
     Returns:
-        callable: A function that takes a pandas Series and returns the N-day EMA
+        callable: A function that takes symbol and pandas Series and returns the N-day EMA
 
     Example:
         >>> # Create a 20-day EMA calculator
         >>> ema_20 = EMA(20)
         >>>
         >>> # Apply it to price data
-        >>> df['EMA_20'] = ema_20(df['Close'])
+        >>> df['EMA_20'] = ema_20('AAPL', df['Close'])
     """
-    def compute_ema(series):
+    def compute_ema(symbol, series):
         """
         Compute the N-day exponential moving average.
 
         Args:
+            symbol (str): Stock ticker symbol (e.g., 'AAPL')
             series (pd.Series): Time series data (typically price data)
 
         Returns:
@@ -106,7 +110,7 @@ def EMA(N):
             raise TypeError(f"Expected pandas Series, got {type(series)}")
 
         result = series.ewm(span=N, adjust=False).mean()
-        logger.debug(f"Computed {N}-day EMA with {len(result)} data points")
+        logger.debug(f"Computed {N}-day EMA for {symbol} with {len(result)} data points")
 
         return result
 
@@ -115,6 +119,7 @@ def EMA(N):
     compute_ema.__doc__ = f"""Compute {N}-day Exponential Moving Average.
 
     Args:
+        symbol (str): Stock ticker symbol
         series (pd.Series): Time series data
 
     Returns:

@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from strategies.base import BaseStrategy
-from signals.technical import SMA
+from signals.technical import sma
 import pandas as pd
 import logging
 
@@ -58,9 +58,9 @@ class DMA(BaseStrategy):
         """
         df = prices.copy()
 
-        # Calculate N-day moving average using SMA signal
-        sma_calculator = SMA(self.lookback)
-        df[f'DMA'] = sma_calculator(df['Close'])
+        # Calculate N-day moving average using sma signal function
+        # sma now takes symbol, period, and price_series
+        df[f'DMA'] = sma(self.symbol, self.lookback, df['Close'])
 
         # Initialize Signal column
         df['Signal'] = 0

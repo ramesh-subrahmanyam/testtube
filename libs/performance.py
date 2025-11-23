@@ -13,25 +13,35 @@ import numpy as np
 TRADING_DAYS_PER_YEAR = 252
 
 
-def stats(pnl_series):
+def stats(pnl_series, positions=None):
     """
-    Calculate performance statistics from a P&L series.
+    Calculate comprehensive performance statistics from a P&L series.
 
     Args:
         pnl_series (pd.Series): Series of daily profit and loss values
                                Index should be dates, values should be daily PnL
+        positions (pd.Series, optional): Position series to identify trades
 
     Returns:
         dict: Dictionary containing:
             - sharpe: Annualized Sharpe ratio
             - total_pnl: Total profit/loss
-            - num_trades: Number of trades (entries/exits)
+            - num_trades: Number of trades (round trips)
             - mean_pnl_per_trade: Average PnL per trade
+            - num_wins: Number of winning trades
+            - num_losses: Number of losing trades
+            - avg_pnl_win: Average PnL per winning trade
+            - avg_pnl_loss: Average PnL per losing trade
+            - days_held_wins: Average days held for winning trades
+            - days_held_losses: Average days held for losing trades
+            - max_drawdown: Maximum drawdown (dollar amount)
+            - drawdown_2: Second largest drawdown
+            - drawdown_3: Third largest drawdown
 
     Example:
         # Assuming you have a strategy result with positions
         pnl = calculate_pnl(df['Close'], df['Position'])
-        performance = stats(pnl)
+        performance = stats(pnl, df['Position'])
         print(f"Sharpe: {performance['sharpe']:.2f}")
         print(f"Total PnL: ${performance['total_pnl']:.2f}")
     """
@@ -40,7 +50,16 @@ def stats(pnl_series):
             'sharpe': 0.0,
             'total_pnl': 0.0,
             'num_trades': 0,
-            'mean_pnl_per_trade': 0.0
+            'mean_pnl_per_trade': 0.0,
+            'num_wins': 0,
+            'num_losses': 0,
+            'avg_pnl_win': 0.0,
+            'avg_pnl_loss': 0.0,
+            'days_held_wins': 0.0,
+            'days_held_losses': 0.0,
+            'max_drawdown': 0.0,
+            'drawdown_2': 0.0,
+            'drawdown_3': 0.0
         }
 
     # Total PnL
@@ -55,21 +74,164 @@ def stats(pnl_series):
     else:
         sharpe = (mean_pnl / std_pnl) * np.sqrt(TRADING_DAYS_PER_YEAR)
 
-    # Number of trades (count non-zero PnL days as proxy)
-    # A more accurate count would need position changes
-    num_trades = (pnl_series != 0).sum()
-
-    # Mean PnL per trade
-    if num_trades > 0:
-        mean_pnl_per_trade = total_pnl / num_trades
+    # Calculate trade-level statistics if positions are provided
+    if positions is not None:
+        trade_stats = _calculate_trade_stats(pnl_series, positions)
     else:
-        mean_pnl_per_trade = 0.0
+        # Fallback to simple calculation
+        num_trades = (pnl_series != 0).sum()
+        mean_pnl_per_trade = total_pnl / num_trades if num_trades > 0 else 0.0
+        trade_stats = {
+            'num_trades': num_trades,
+            'mean_pnl_per_trade': mean_pnl_per_trade,
+            'num_wins': 0,
+            'num_losses': 0,
+            'avg_pnl_win': 0.0,
+            'avg_pnl_loss': 0.0,
+            'days_held_wins': 0.0,
+            'days_held_losses': 0.0
+        }
+
+    # Calculate drawdowns
+    drawdown_stats = _calculate_drawdowns(pnl_series)
 
     return {
         'sharpe': sharpe,
         'total_pnl': total_pnl,
+        **trade_stats,
+        **drawdown_stats
+    }
+
+
+def _calculate_trade_stats(pnl_series, positions):
+    """
+    Calculate trade-level statistics.
+
+    A trade is defined as a period from entry to exit (position goes from 0 to non-zero to 0).
+
+    Args:
+        pnl_series (pd.Series): Daily PnL series
+        positions (pd.Series): Position series
+
+    Returns:
+        dict: Trade-level statistics
+    """
+    # Identify trade periods (when position is non-zero)
+    position_changes = positions.diff()
+
+    # Find entries and exits
+    entries = (positions != 0) & (positions.shift(1) == 0)
+    exits = (positions == 0) & (positions.shift(1) != 0)
+
+    # Identify trade groups
+    in_trade = positions != 0
+    trade_groups = (entries.cumsum())
+
+    # Only consider periods when in trade
+    trade_groups = trade_groups[in_trade]
+    trade_pnl = pnl_series[in_trade]
+
+    if len(trade_groups) == 0 or trade_groups.max() == 0:
+        return {
+            'num_trades': 0,
+            'mean_pnl_per_trade': 0.0,
+            'num_wins': 0,
+            'num_losses': 0,
+            'avg_pnl_win': 0.0,
+            'avg_pnl_loss': 0.0,
+            'days_held_wins': 0.0,
+            'days_held_losses': 0.0
+        }
+
+    # Calculate PnL per trade
+    trade_pnls = trade_pnl.groupby(trade_groups).sum()
+    trade_days = trade_pnl.groupby(trade_groups).count()
+
+    # Separate wins and losses
+    # Note: Zero PnL trades are counted as wins
+    winning_trades = trade_pnls[trade_pnls >= 0]
+    losing_trades = trade_pnls[trade_pnls < 0]
+
+    num_wins = len(winning_trades)
+    num_losses = len(losing_trades)
+    num_trades = len(trade_pnls)
+
+    # Calculate averages
+    avg_pnl_win = winning_trades.mean() if num_wins > 0 else 0.0
+    avg_pnl_loss = losing_trades.mean() if num_losses > 0 else 0.0
+    mean_pnl_per_trade = trade_pnls.mean() if num_trades > 0 else 0.0
+
+    # Calculate days held
+    days_held_wins = trade_days[trade_pnls > 0].mean() if num_wins > 0 else 0.0
+    days_held_losses = trade_days[trade_pnls < 0].mean() if num_losses > 0 else 0.0
+
+    return {
         'num_trades': num_trades,
-        'mean_pnl_per_trade': mean_pnl_per_trade
+        'mean_pnl_per_trade': mean_pnl_per_trade,
+        'num_wins': num_wins,
+        'num_losses': num_losses,
+        'avg_pnl_win': avg_pnl_win,
+        'avg_pnl_loss': avg_pnl_loss,
+        'days_held_wins': days_held_wins,
+        'days_held_losses': days_held_losses
+    }
+
+
+def _calculate_drawdowns(pnl_series):
+    """
+    Calculate the top 3 drawdowns.
+
+    Args:
+        pnl_series (pd.Series): Daily PnL series
+
+    Returns:
+        dict: Drawdown statistics
+    """
+    # Cumulative PnL
+    cum_pnl = pnl_series.cumsum()
+
+    # Running maximum
+    running_max = cum_pnl.cummax()
+
+    # Drawdown series
+    drawdown = cum_pnl - running_max
+
+    # Find all drawdown periods
+    # A drawdown period starts when drawdown becomes negative and ends when it returns to 0
+    in_drawdown = drawdown < 0
+
+    if not in_drawdown.any():
+        return {
+            'max_drawdown': 0.0,
+            'drawdown_2': 0.0,
+            'drawdown_3': 0.0
+        }
+
+    # Group consecutive drawdown periods
+    drawdown_groups = (in_drawdown != in_drawdown.shift()).cumsum()
+    drawdown_groups = drawdown_groups[in_drawdown]
+
+    # Get minimum (most negative) drawdown for each period
+    if len(drawdown_groups) == 0:
+        return {
+            'max_drawdown': 0.0,
+            'drawdown_2': 0.0,
+            'drawdown_3': 0.0
+        }
+
+    drawdown_mins = drawdown[in_drawdown].groupby(drawdown_groups).min()
+
+    # Sort to get top 3
+    top_drawdowns = drawdown_mins.sort_values()
+
+    max_dd = top_drawdowns.iloc[0] if len(top_drawdowns) > 0 else 0.0
+    dd_2 = top_drawdowns.iloc[1] if len(top_drawdowns) > 1 else 0.0
+    dd_3 = top_drawdowns.iloc[2] if len(top_drawdowns) > 2 else 0.0
+
+    return {
+        'max_drawdown': max_dd,
+        'drawdown_2': dd_2,
+        'drawdown_3': dd_3
     }
 
 

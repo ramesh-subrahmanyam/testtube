@@ -29,25 +29,41 @@ class Backtester:
     All calculations are fully vectorized for efficiency.
     """
 
-    def __init__(self, strategy, dollar_size=100000):
+    def __init__(self, strategy, dollar_size=100000, vol_normalization=None):
         """
         Initialize the Backtester.
 
         Args:
             strategy: Strategy object (instance of BaseStrategy or subclass)
             dollar_size (float): Target dollar size for position sizing (default: 100,000)
+                                 Note: Only used if vol_normalization is None
+            vol_normalization (VolNormalization, optional): VolNormalization object for
+                                                             vol-adjusted position sizing.
+                                                             If provided, overrides dollar_size.
 
         Example:
             from strategies import MovingAverageCrossoverStrategy
             from libs.backtester import Backtester
+            from libs.vol_normalization import VolNormalization
+            from functools import partial
+            from libs.volatility import simple_vol
 
+            # Without vol_normalization (legacy)
             strategy = MovingAverageCrossoverStrategy(short_period=20, long_period=50)
             backtester = Backtester(strategy, dollar_size=100000)
+            backtester('AAPL', '2024-01-01', '2024-12-31', slippage_bps=5)
 
+            # With vol_normalization (recommended)
+            vol_norm = VolNormalization(
+                total_dollar_size=100000,
+                volatility_function=partial(simple_vol, N=20)
+            )
+            backtester = Backtester(strategy, vol_normalization=vol_norm)
             backtester('AAPL', '2024-01-01', '2024-12-31', slippage_bps=5)
         """
         self.strategy = strategy
         self.dollar_size = dollar_size
+        self.vol_normalization = vol_normalization
 
         # Will be set when __call__ is invoked
         self.symbol = None
@@ -58,7 +74,10 @@ class Backtester:
         self.unslipped_performance = None
 
         logger.info(f"Initialized Backtester with {strategy.__class__.__name__}")
-        logger.info(f"Dollar size: ${dollar_size:,.2f}")
+        if vol_normalization is not None:
+            logger.info(f"Using VolNormalization: {vol_normalization}")
+        else:
+            logger.info(f"Dollar size: ${dollar_size:,.2f}")
 
     def __call__(self, symbol, start_date, end_date, slippage_bps=0):
         """
@@ -103,22 +122,36 @@ class Backtester:
 
         df = self.strategy.df.copy()
 
-        # Step 2: Calculate dollar volatility (vectorized)
-        # Dollar volatility = (return volatility / 100) × price
-        # Volatility is already in percentage form from volatility functions
-        logger.info("Calculating dollar volatility...")
-        df['Dollar_Volatility'] = (df['Volatility'] / 100) * df['Close']
+        # Step 2 & 3: Calculate vol-adjusted positions
+        if self.vol_normalization is not None:
+            # Use VolNormalization object to calculate vol multiplier
+            logger.info("Using VolNormalization object to calculate vol multiplier...")
+            vol_multiplier = self.vol_normalization(df)
+            df['Vol_Multiplier'] = vol_multiplier
 
-        # Handle division by zero or NaN
-        df['Dollar_Volatility'] = df['Dollar_Volatility'].replace(0, np.nan)
+            # Vol-adjusted position = position × vol_multiplier
+            df['Vol_Adjusted_Position'] = df['Position'] * vol_multiplier
 
-        # Step 3: Calculate vol-adjusted positions (vectorized)
-        # Vol-adjusted position = position × (dollar_size / dollar_volatility)
-        logger.info("Calculating vol-adjusted positions...")
-        df['Vol_Adjusted_Position'] = df['Position'] * (self.dollar_size / df['Dollar_Volatility'])
+            # Calculate dollar volatility for reporting purposes
+            df['Dollar_Volatility'] = (df['Volatility'] / 100) * df['Close']
+        else:
+            # Legacy behavior: Calculate dollar volatility and vol-adjusted positions
+            # Dollar volatility = (return volatility / 100) × price
+            # Volatility is already in percentage form from volatility functions
+            logger.info("Calculating dollar volatility...")
+            df['Dollar_Volatility'] = (df['Volatility'] / 100) * df['Close']
 
-        # Fill NaN positions with 0
-        df['Vol_Adjusted_Position'] = df['Vol_Adjusted_Position'].fillna(0)
+            # Handle division by zero or NaN
+            df['Dollar_Volatility'] = df['Dollar_Volatility'].replace(0, np.nan)
+
+            # Calculate vol-adjusted positions (vectorized)
+            # Vol-adjusted position = position × (dollar_size / dollar_volatility)
+            logger.info("Calculating vol-adjusted positions...")
+            df['Vol_Multiplier'] = self.dollar_size / df['Dollar_Volatility']
+            df['Vol_Adjusted_Position'] = df['Position'] * df['Vol_Multiplier']
+
+            # Fill NaN positions with 0
+            df['Vol_Adjusted_Position'] = df['Vol_Adjusted_Position'].fillna(0)
 
         # Step 4: Calculate unslipped PnL (vectorized)
         # Daily return
@@ -166,12 +199,12 @@ class Backtester:
         logger.info("Calculating performance statistics...")
 
         # Unslipped performance
-        self.unslipped_performance = stats(df['Unslipped_PnL'])
+        self.unslipped_performance = stats(df['Unslipped_PnL'], df['Position'])
         logger.info(f"Unslipped - Sharpe: {self.unslipped_performance['sharpe']:.3f}, "
                    f"Total PnL: ${self.unslipped_performance['total_pnl']:,.2f}")
 
         # Slipped performance
-        self.slipped_performance = stats(df['Slipped_PnL'])
+        self.slipped_performance = stats(df['Slipped_PnL'], df['Position'])
         logger.info(f"Slipped - Sharpe: {self.slipped_performance['sharpe']:.3f}, "
                    f"Total PnL: ${self.slipped_performance['total_pnl']:,.2f}")
 
@@ -195,7 +228,10 @@ class Backtester:
         lines.append("=" * 80)
         lines.append(f"BACKTEST RESULTS: {self.symbol}")
         lines.append(f"Period: {self.start_date} to {self.end_date}")
-        lines.append(f"Dollar Size: ${self.dollar_size:,.2f}")
+        if self.vol_normalization is not None:
+            lines.append(f"Vol Normalization: {self.vol_normalization}")
+        else:
+            lines.append(f"Dollar Size: ${self.dollar_size:,.2f}")
         lines.append(f"Slippage: {self.slippage_bps} bps")
         lines.append("=" * 80)
 
@@ -239,6 +275,101 @@ class Backtester:
             return None
 
         return self.strategy.df
+
+    def visualize(self, output_path, bnh_backtester=None):
+        """
+        Create a visualization of cumulative PnL plots (slipped and unslipped).
+
+        This method generates a PNG file containing:
+        - Cumulative unslipped PnL curve (blue line)
+        - Cumulative slipped PnL curve (red line)
+        - Cumulative Buy & Hold PnL curve (green line, optional)
+        - Legend showing Sharpe ratios for each
+
+        Args:
+            output_path (str): Path where the PNG file will be saved
+                              Example: 'output/AAPL-dma.png'
+            bnh_backtester (Backtester, optional): Buy & Hold backtester for comparison
+
+        Returns:
+            None
+
+        Example:
+            backtester('AAPL', '2024-01-01', '2024-12-31', slippage_bps=5)
+            backtester.visualize('output/AAPL-dma.png')
+
+            # With Buy & Hold comparison:
+            backtester.visualize('output/AAPL-dma.png', bnh_backtester=bnh_bt)
+        """
+        if self.strategy.df is None or self.slipped_performance is None:
+            logger.error("No backtest results available. Run backtest first.")
+            return
+
+        # Lazy import matplotlib (only when visualization is needed)
+        try:
+            import matplotlib
+            matplotlib.use('Agg')  # Use non-interactive backend
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            logger.error(f"matplotlib is required for visualization. Install with: pip install matplotlib ({e})")
+            print("ERROR: matplotlib is not installed. Install with: pip install matplotlib")
+            return
+        except Exception as e:
+            logger.warning(f"matplotlib warning (continuing): {e}")
+
+        df = self.strategy.df
+
+        # Create figure
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # Plot cumulative PnL curves
+        ax.plot(df.index, df['Cumulative_Unslipped_PnL'],
+                label=f'Unslipped (Sharpe: {self.unslipped_performance["sharpe"]:.3f})',
+                linewidth=2, color='blue')
+        ax.plot(df.index, df['Cumulative_Slipped_PnL'],
+                label=f'Slipped (Sharpe: {self.slipped_performance["sharpe"]:.3f})',
+                linewidth=2, color='red', linestyle='--')
+
+        # Add Buy & Hold if provided
+        if bnh_backtester is not None and bnh_backtester.strategy.df is not None:
+            bnh_df = bnh_backtester.strategy.df
+            bnh_sharpe = bnh_backtester.slipped_performance['sharpe']
+            ax.plot(bnh_df.index, bnh_df['Cumulative_Slipped_PnL'],
+                    label=f'Buy & Hold (Sharpe: {bnh_sharpe:.3f})',
+                    linewidth=2, color='green', linestyle='-', alpha=0.7)
+
+        # Add labels and title
+        ax.set_xlabel('Date', fontsize=12)
+        ax.set_ylabel('Cumulative P&L ($)', fontsize=12)
+
+        # Update title based on whether comparison is shown
+        if bnh_backtester is not None:
+            title = f'{self.symbol} - Strategy Comparison\n{self.start_date} to {self.end_date}'
+        else:
+            title = f'{self.symbol} - {self.strategy.__class__.__name__} Strategy\n{self.start_date} to {self.end_date}'
+
+        ax.set_title(title, fontsize=14, fontweight='bold')
+
+        # Add grid
+        ax.grid(True, alpha=0.3)
+
+        # Add legend
+        ax.legend(loc='best', fontsize=10)
+
+        # Format y-axis as currency
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+
+        # Rotate x-axis labels for better readability
+        plt.xticks(rotation=45, ha='right')
+
+        # Tight layout to prevent label cutoff
+        plt.tight_layout()
+
+        # Save figure
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        logger.info(f"Visualization saved to {output_path}")
 
 
 if __name__ == "__main__":
