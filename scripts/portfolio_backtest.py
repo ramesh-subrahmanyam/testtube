@@ -327,12 +327,12 @@ def main():
     print()
 
     try:
-        # Note: PortfolioBacktester currently doesn't accept exposure_manager
-        # If needed, we may need to modify it, but for now we'll proceed without
+        # Create portfolio backtester with exposure manager if provided
         portfolio = PortfolioBacktester(
             strategy_class=strategy_class,
             strategy_params=strategy_params,
-            dollar_size=dollar_size
+            dollar_size=dollar_size,
+            exposure_manager=exposure_manager
         )
 
         # Run portfolio backtest

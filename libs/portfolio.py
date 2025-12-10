@@ -26,7 +26,7 @@ class PortfolioBacktester:
     5. Creates visualizations of cumulative PnL curves
     """
 
-    def __init__(self, strategy_class, strategy_params=None, dollar_size=100000):
+    def __init__(self, strategy_class, strategy_params=None, dollar_size=100000, exposure_manager=None):
         """
         Initialize the Portfolio Backtester.
 
@@ -34,20 +34,26 @@ class PortfolioBacktester:
             strategy_class: Strategy class (not instance) to use for all symbols
             strategy_params (dict): Parameters to pass to strategy constructor
             dollar_size (float): Target dollar size for position sizing per symbol
+            exposure_manager: ExposureManager object for exposure-adjusted position sizing.
+                              If provided, overrides dollar_size behavior.
 
         Example:
             from strategies.dma import DMA
             from libs.portfolio import PortfolioBacktester
+            from libs.exposure_management import ConstantDollarExposure
 
+            # With constant dollar exposure
+            exp_mgr = ConstantDollarExposure(target_dollar_exposure=100000)
             portfolio = PortfolioBacktester(
                 strategy_class=DMA,
                 strategy_params={'lookback': 200},
-                dollar_size=100000
+                exposure_manager=exp_mgr
             )
         """
         self.strategy_class = strategy_class
         self.strategy_params = strategy_params or {}
         self.dollar_size = dollar_size
+        self.exposure_manager = exposure_manager
 
         # Results storage
         self.symbols = []
@@ -61,7 +67,10 @@ class PortfolioBacktester:
         self.portfolio_df = None
 
         logger.info(f"Initialized PortfolioBacktester with {strategy_class.__name__}")
-        logger.info(f"Dollar size per symbol: ${dollar_size:,.2f}")
+        if exposure_manager is not None:
+            logger.info(f"Using ExposureManager: {exposure_manager}")
+        else:
+            logger.info(f"Dollar size per symbol: ${dollar_size:,.2f}")
 
     def __call__(self, symbols, start_date, end_date, slippage_bps=0):
         """
@@ -101,7 +110,7 @@ class PortfolioBacktester:
                 strategy = self.strategy_class(**self.strategy_params)
 
                 # Create backtester
-                backtester = Backtester(strategy, dollar_size=self.dollar_size)
+                backtester = Backtester(strategy, dollar_size=self.dollar_size, exposure_manager=self.exposure_manager)
 
                 # Run backtest
                 backtester(symbol, start_date, end_date, slippage_bps)
