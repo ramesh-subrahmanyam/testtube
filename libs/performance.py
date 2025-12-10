@@ -124,6 +124,8 @@ def stats(pnl_series, positions=None):
             'mean_pnl_per_trade': mean_pnl_per_trade,
             'num_wins': 0,
             'num_losses': 0,
+            'total_pnl_wins': 0.0,
+            'total_pnl_losses': 0.0,
             'avg_pnl_win': 0.0,
             'avg_pnl_loss': 0.0,
             'days_held_wins': 0.0,
@@ -302,7 +304,9 @@ def _calculate_trade_stats(pnl_series, positions):
     num_losses = len(losing_trades)
     num_trades = len(trade_pnls)
 
-    # Calculate averages
+    # Calculate totals and averages
+    total_pnl_wins = winning_trades.sum() if num_wins > 0 else 0.0
+    total_pnl_losses = losing_trades.sum() if num_losses > 0 else 0.0
     avg_pnl_win = winning_trades.mean() if num_wins > 0 else 0.0
     avg_pnl_loss = losing_trades.mean() if num_losses > 0 else 0.0
     mean_pnl_per_trade = trade_pnls.mean() if num_trades > 0 else 0.0
@@ -316,6 +320,8 @@ def _calculate_trade_stats(pnl_series, positions):
         'mean_pnl_per_trade': mean_pnl_per_trade,
         'num_wins': num_wins,
         'num_losses': num_losses,
+        'total_pnl_wins': total_pnl_wins,
+        'total_pnl_losses': total_pnl_losses,
         'avg_pnl_win': avg_pnl_win,
         'avg_pnl_loss': avg_pnl_loss,
         'days_held_wins': days_held_wins,
