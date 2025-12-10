@@ -195,7 +195,8 @@ class PortfolioBacktester:
         from .performance import stats
         self.portfolio_performance = stats(portfolio_df['Portfolio_PnL'])
         
-        # Aggregate wins and losses across all symbols
+        # Aggregate trades, wins, and losses across all symbols
+        total_trades = 0
         total_wins = 0
         total_losses = 0
         total_pnl_wins = 0.0
@@ -204,12 +205,14 @@ class PortfolioBacktester:
         for symbol in self.symbols:
             bt = self.backtesters[symbol]
             perf = bt.slipped_performance
+            total_trades += perf.get('num_trades', 0)
             total_wins += perf.get('num_wins', 0)
             total_losses += perf.get('num_losses', 0)
             total_pnl_wins += perf.get('total_pnl_wins', 0.0)
             total_pnl_losses += perf.get('total_pnl_losses', 0.0)
         
-        # Update portfolio performance with aggregated win/loss metrics
+        # Update portfolio performance with aggregated metrics
+        self.portfolio_performance['num_trades'] = total_trades
         self.portfolio_performance['num_wins'] = total_wins
         self.portfolio_performance['num_losses'] = total_losses
         self.portfolio_performance['avg_pnl_win'] = (
@@ -218,6 +221,13 @@ class PortfolioBacktester:
         self.portfolio_performance['avg_pnl_loss'] = (
             total_pnl_losses / total_losses if total_losses > 0 else 0.0
         )
+        # Recalculate mean PnL per trade using aggregated total PnL and total trades
+        if total_trades > 0:
+            self.portfolio_performance['mean_pnl_per_trade'] = (
+                self.portfolio_performance['total_pnl'] / total_trades
+            )
+        else:
+            self.portfolio_performance['mean_pnl_per_trade'] = 0.0
         # Remove days held fields since they're not needed
         self.portfolio_performance['days_held_wins'] = 0.0
         self.portfolio_performance['days_held_losses'] = 0.0
