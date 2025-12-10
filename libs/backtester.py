@@ -136,7 +136,7 @@ class Backtester:
         # Step 2 & 3: Calculate exposure-adjusted positions
         if self.exposure_manager is not None:
             # Use ExposureManager object to calculate multiplier
-            logger.info("Using ExposureManager to calculate exposure multiplier...")
+            logger.info(f"Using ExposureManager {self.exposure_manager.__class__.__name__} to calculate exposure multiplier...")
             multiplier = self.exposure_manager(df)
             df['Exposure_Multiplier'] = multiplier
 
