@@ -261,7 +261,7 @@ def main():
         print("Make sure backtest.py is in the same directory (scripts/)")
         sys.exit(1)
     
-    from strategies import get_strategy_class
+    from strategies import get_strategy_class, STRATEGY_REGISTRY
     
     # Parse command-line arguments
     args = parse_arguments()
@@ -287,13 +287,18 @@ def main():
     # Load configuration
     config = load_config(args.config)
     strategy_config = config.get('strategy', {})
-    exposure_config = config.get('exposure', None)
+    exposure_config = config.get('exposure_management', None)
 
     # Get strategy class and parameters
     strategy_name = strategy_config.get('name')
     if not strategy_name:
         raise ValueError("Configuration must specify a strategy name under 'strategy.name'")
-    strategy_class = get_strategy_class(strategy_name)
+    try:
+        strategy_class = get_strategy_class(strategy_name)
+    except ValueError as e:
+        print(f"Error: {e}")
+        print("Available strategies:", ', '.join(STRATEGY_REGISTRY.keys()))
+        sys.exit(1)
     strategy_params = strategy_config.get('params', {})
 
     # Instantiate exposure manager if provided
@@ -321,6 +326,8 @@ def main():
     print(f"Period:         {args.start} to {args.end}")
     print(f"Dollar Size:    ${dollar_size:,.2f} per symbol")
     print(f"Slippage:       {args.slippage} bps")
+    if exposure_config:
+        print(f"Exposure Config: {exposure_config}")
     if exposure_manager:
         print(f"Exposure Manager: {exposure_manager.__class__.__name__}")
     print("=" * 80)
