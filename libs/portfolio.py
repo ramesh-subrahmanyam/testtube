@@ -240,7 +240,7 @@ class PortfolioBacktester:
             aligned_pos = pos_series.reindex(portfolio_df.index, fill_value=0)
             aligned_positions.append(aligned_pos)
         
-        # Create a combined exposure mask: True if any symbol has a non-zero position
+        # Create a combined exposure mask and calculate total dollar exposure
         if aligned_positions:
             # Convert to DataFrame for easier manipulation
             pos_df = pd.concat(aligned_positions, axis=1)
@@ -248,12 +248,20 @@ class PortfolioBacktester:
             exposure_mask = (pos_df.abs() > 1e-10).any(axis=1)
             num_exposure_days = exposure_mask.sum()
             
+            # Calculate total dollar exposure per day
+            # Count number of symbols with non-zero positions each day
+            num_symbols_exposed = (pos_df.abs() > 1e-10).sum(axis=1)
+            total_dollar_exposure = num_symbols_exposed * self.dollar_size
+            
             # Calculate exposure-based Sharpe using only days with exposure
             if num_exposure_days > 0:
                 # Get portfolio PnL on exposure days
                 exposure_pnl = portfolio_df['Portfolio_PnL'][exposure_mask]
-                # Calculate daily returns
-                exposure_daily_returns = exposure_pnl / self.dollar_size
+                # Get total dollar exposure on those days
+                exposure_total_dollar_exposure = total_dollar_exposure[exposure_mask]
+                # Calculate daily returns: PnL / total_dollar_exposure
+                # Avoid division by zero (shouldn't happen on exposure days)
+                exposure_daily_returns = exposure_pnl / exposure_total_dollar_exposure
                 # Calculate Sharpe ratio
                 if len(exposure_daily_returns) > 1 and exposure_daily_returns.std() > 0:
                     sharpe_exposure = np.sqrt(252) * exposure_daily_returns.mean() / exposure_daily_returns.std()
