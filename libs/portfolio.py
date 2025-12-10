@@ -143,8 +143,9 @@ class PortfolioBacktester:
         """
         logger.info("Aggregating portfolio performance...")
 
-        # Collect all dataframes
+        # Collect all dataframes and position data
         dfs = []
+        all_positions = []
         for symbol in self.symbols:
             backtester = self.backtesters[symbol]
             df = backtester.get_dataframe()
@@ -153,6 +154,23 @@ class PortfolioBacktester:
                 df_subset = df[['Slipped_PnL', 'Cumulative_Slipped_PnL']].copy()
                 df_subset.columns = [f'{symbol}_PnL', f'{symbol}_Cumulative_PnL']
                 dfs.append(df_subset)
+                
+                # Collect position data for exposure calculation
+                # Look for position column (could be 'Position' or 'Exposure_Adjusted_Position')
+                pos_col = None
+                for col in ['Position', 'Exposure_Adjusted_Position']:
+                    if col in df.columns:
+                        pos_col = col
+                        break
+                
+                if pos_col:
+                    # Get position values as a Series with the same index
+                    pos_series = df[pos_col].copy()
+                else:
+                    # If no position column found, create a series of zeros
+                    pos_series = pd.Series(0, index=df.index)
+                
+                all_positions.append(pos_series)
 
         if not dfs:
             logger.error("No valid dataframes to aggregate")
@@ -173,12 +191,56 @@ class PortfolioBacktester:
         # Store portfolio dataframe
         self.portfolio_df = portfolio_df
 
-        # Calculate portfolio statistics
+        # Calculate portfolio statistics using all days
         from .performance import stats
         self.portfolio_performance = stats(portfolio_df['Portfolio_PnL'])
+        
+        # Calculate exposure-based metrics
+        # Align all position series to the same index (portfolio_df index)
+        aligned_positions = []
+        for pos_series in all_positions:
+            # Reindex to portfolio_df index, filling missing values with 0
+            aligned_pos = pos_series.reindex(portfolio_df.index, fill_value=0)
+            aligned_positions.append(aligned_pos)
+        
+        # Create a combined exposure mask: True if any symbol has a non-zero position
+        if aligned_positions:
+            # Convert to DataFrame for easier manipulation
+            pos_df = pd.concat(aligned_positions, axis=1)
+            # Create exposure mask (any non-zero position)
+            exposure_mask = (pos_df.abs() > 1e-10).any(axis=1)
+            num_exposure_days = exposure_mask.sum()
+            
+            # Calculate exposure-based Sharpe using only days with exposure
+            if num_exposure_days > 0:
+                # Get portfolio PnL on exposure days
+                exposure_pnl = portfolio_df['Portfolio_PnL'][exposure_mask]
+                # Calculate daily returns
+                exposure_daily_returns = exposure_pnl / self.dollar_size
+                # Calculate Sharpe ratio
+                if len(exposure_daily_returns) > 1 and exposure_daily_returns.std() > 0:
+                    sharpe_exposure = np.sqrt(252) * exposure_daily_returns.mean() / exposure_daily_returns.std()
+                else:
+                    sharpe_exposure = 0
+            else:
+                sharpe_exposure = 0
+                num_exposure_days = 0
+        else:
+            sharpe_exposure = 0
+            num_exposure_days = 0
+        
+        # Add exposure-based metrics to portfolio performance
+        self.portfolio_performance['sharpe_exposure'] = sharpe_exposure
+        self.portfolio_performance['num_exposure_days'] = num_exposure_days
+        self.portfolio_performance['pnl_per_exposure_day'] = (
+            self.portfolio_performance['total_pnl'] / num_exposure_days 
+            if num_exposure_days > 0 else 0
+        )
 
         logger.info(f"Portfolio Sharpe: {self.portfolio_performance['sharpe']:.3f}")
+        logger.info(f"Portfolio Sharpe (Exposure): {self.portfolio_performance['sharpe_exposure']:.3f}")
         logger.info(f"Portfolio Total PnL: ${self.portfolio_performance['total_pnl']:,.2f}")
+        logger.info(f"Number of exposure days: {num_exposure_days}")
 
     def get_summary(self):
         """
