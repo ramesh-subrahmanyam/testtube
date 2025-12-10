@@ -304,7 +304,11 @@ def main():
     # Instantiate exposure manager if provided
     exposure_manager = None
     if exposure_config:
-        exposure_manager = instantiate_exposure_manager(exposure_config)
+        try:
+            exposure_manager = instantiate_exposure_manager(exposure_config)
+        except Exception as e:
+            print(f"Warning: Failed to instantiate exposure manager: {e}")
+            print("Continuing without exposure manager.")
 
     # Read symbols
     symbols = read_symbols_file(args.symbols)
