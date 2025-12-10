@@ -179,10 +179,13 @@ def display_performance_table(portfolio):
 
     # Define the metrics to display
     metrics = [
+        ('Sharpe Ratio', 'sharpe', '.3f'),
+        ('Sharpe (Exposure)', 'sharpe_exposure', '.3f'),
+        ('Total PnL', 'total_pnl', ',.2f'),
+        ('#Days of Exposure', 'num_exposure_days', ',.0f'),
+        ('PnL per Exposure Day', 'pnl_per_exposure_day', ',.2f'),
         ('Number of Trades', 'num_trades', ',.0f'),
         ('Mean PnL per Trade', 'mean_pnl_per_trade', ',.2f'),
-        ('Sharpe Ratio', 'sharpe', '.3f'),
-        ('Total PnL', 'total_pnl', ',.2f'),
         ('#Wins', 'num_wins', ',.0f'),
         ('Average PnL/Win', 'avg_pnl_win', ',.2f'),
         ('Days Held (Wins)', 'days_held_wins', '.1f'),
@@ -230,7 +233,7 @@ def display_performance_table(portfolio):
         if 'f' in fmt:
             # Numeric formatting
             if key in ['total_pnl', 'mean_pnl_per_trade', 'avg_pnl_win', 'avg_pnl_loss',
-                       'max_drawdown', 'drawdown_2', 'drawdown_3']:
+                       'max_drawdown', 'drawdown_2', 'drawdown_3', 'pnl_per_exposure_day']:
                 # Dollar amounts
                 value_str = f"${value:{fmt}}"
             else:
