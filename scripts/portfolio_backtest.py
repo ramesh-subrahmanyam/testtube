@@ -250,6 +250,7 @@ def main():
     import sys
     import os
     import json
+    import logging
     # Add the scripts directory to the path to import from backtest
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     if scripts_dir not in sys.path:
@@ -273,6 +274,7 @@ def main():
         level=log_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+    logger = logging.getLogger(__name__)
 
     # Validate dates
     if not validate_date(args.start):
