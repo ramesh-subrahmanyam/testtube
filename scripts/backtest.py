@@ -2,31 +2,128 @@
 """
 Main Backtest Script
 
-This script runs a backtest using the 200-day moving average (DMA) strategy
-and displays formatted performance results.
+This script runs a backtest using configuration from a JSON file.
+The config file specifies the strategy, parameters, exposure management, and other settings.
 
 Usage:
-    python backtest.py SYMBOL [--start-date YYYY-MM-DD] [--end-date YYYY-MM-DD] [--slippage BPS] [--dollar-size SIZE]
+    python backtest.py SYMBOL [CONFIG_FILE]
+    python backtest.py SYMBOL [--config CONFIG_FILE]
 
 Examples:
-    python backtest.py AAPL
-    python backtest.py AAPL --start-date 2020-01-01
-    python backtest.py AAPL --start-date 2020-01-01 --end-date 2024-12-31
-    python backtest.py AAPL --slippage 5 --dollar-size 250000
+    python backtest.py AAPL                              # Uses data/backtest.json with AAPL
+    python backtest.py MSFT data/my_config.json          # MSFT with custom config
+    python backtest.py SPY --config my_custom_config.json  # SPY with named config arg
 """
 
 import sys
 from pathlib import Path
 import argparse
-from datetime import datetime
+import json
 import logging
+from datetime import datetime
 
 # Add parent directory to path to import libs
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from strategies.dma import DMA
-from strategies.vol_normalized_buy_and_hold import VolNormalizedBuyAndHold
-from libs.backtester import Backtester
+# Import registries
+from strategies import get_strategy_class
+from libs.exposure_management import get_exposure_manager_class
+
+
+def load_config(config_path):
+    """
+    Load configuration from JSON file.
+
+    Args:
+        config_path (str): Path to JSON config file
+
+    Returns:
+        dict: Configuration dictionary
+    """
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    return config
+
+
+def instantiate_strategy(strategy_config):
+    """
+    Instantiate a strategy from configuration.
+
+    Args:
+        strategy_config (dict): Strategy configuration with 'name', 'params', 'signal_config', and 'entry_exit_config'
+
+    Returns:
+        BaseStrategy: Instantiated strategy object
+    """
+    strategy_class = get_strategy_class(strategy_config['name'])
+    strategy = strategy_class(**strategy_config.get('params', {}))
+
+    # Apply entry/exit timing configuration if present
+    entry_exit_config = strategy_config.get('entry_exit_config', {})
+
+    # Support two formats: old format (booleans) and new format (entry_mode string)
+    entry_mode = entry_exit_config.get('entry_mode', None)
+    enter_at_open = entry_exit_config.get('enter_at_open', False)
+    enter_at_next_close = entry_exit_config.get('enter_at_next_close', False)
+    exit_at_open = entry_exit_config.get('exit_at_open', False)
+
+    # If entry_mode is specified, use it (new format)
+    if entry_mode:
+        entry_mode = entry_mode.lower()
+        if entry_mode == 'open':
+            strategy = strategy.enter_at_open()
+        elif entry_mode == 'next_close':
+            strategy = strategy.enter_at_next_close()
+        elif entry_mode == 'close':
+            pass  # Default behavior
+        else:
+            raise ValueError(f"Invalid entry_mode: {entry_mode}. Must be 'close', 'open', or 'next_close'")
+    else:
+        # Old format: use boolean flags
+        if enter_at_open:
+            strategy = strategy.enter_at_open()
+        if enter_at_next_close:
+            strategy = strategy.enter_at_next_close()
+
+    if exit_at_open:
+        strategy = strategy.exit_at_open()
+
+    # Apply signal configuration if present
+    signal_config = strategy_config.get('signal_config', {})
+    frequency = signal_config.get('frequency', 'daily')
+
+    if frequency == 'weekly':
+        day = signal_config.get('day', 'monday')
+        strategy = strategy.periodic('weekly', day=day)
+    elif frequency == 'monthly':
+        when = signal_config.get('when', 'end')
+        strategy = strategy.periodic('monthly', when=when)
+    # 'daily' or unspecified means no periodic modification needed
+
+    return strategy
+
+
+def instantiate_exposure_manager(exp_config):
+    """
+    Instantiate an exposure manager from configuration.
+
+    Args:
+        exp_config (dict): Exposure management configuration
+
+    Returns:
+        ExposureManager: Instantiated exposure manager object
+    """
+    exp_class = get_exposure_manager_class(exp_config['name'])
+    exp_manager = exp_class(**exp_config.get('params', {}))
+
+    # Apply rebalance configuration if present
+    rebalance_config = exp_config.get('rebalance', {})
+    if rebalance_config:
+        frequency = rebalance_config.get('frequency', 'monthly')
+        when = rebalance_config.get('when', 'start')
+        exp_manager = exp_manager.periodic(frequency=frequency, when=when)
+
+    return exp_manager
 
 
 def parse_arguments():
@@ -37,83 +134,46 @@ def parse_arguments():
         argparse.Namespace: Parsed arguments
     """
     parser = argparse.ArgumentParser(
-        description='Run backtest using 200-day moving average strategy',
+        description='Run backtest using JSON configuration file',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s AAPL
-  %(prog)s AAPL --start-date 2020-01-01
-  %(prog)s AAPL --start-date 2020-01-01 --end-date 2024-12-31
-  %(prog)s AAPL --slippage 5 --dollar-size 250000
+  %(prog)s AAPL                              # Uses data/backtest.json with AAPL
+  %(prog)s MSFT data/my_config.json          # MSFT with custom config
+  %(prog)s SPY --config my_custom_config.json  # SPY with named config arg
         """
     )
 
     parser.add_argument(
         'symbol',
         type=str,
-        help='Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)'
+        help='Stock symbol to backtest (e.g., AAPL, MSFT, SPY)'
     )
 
     parser.add_argument(
-        '--start-date',
+        'config_file',
+        nargs='?',
         type=str,
-        default='2010-01-01',
-        help='Start date for backtest (YYYY-MM-DD) [default: 2010-01-01]'
+        default='data/backtest.json',
+        help='Path to JSON configuration file [default: data/backtest.json]'
     )
 
     parser.add_argument(
-        '--end-date',
+        '--config',
         type=str,
-        default=datetime.today().strftime('%Y-%m-%d'),
-        help='End date for backtest (YYYY-MM-DD) [default: today]'
+        dest='config_override',
+        help='Alternative way to specify config file path (overrides positional argument)'
     )
 
-    parser.add_argument(
-        '--slippage',
-        type=float,
-        default=5.0,
-        help='Slippage in basis points [default: 5]'
-    )
+    args = parser.parse_args()
 
-    parser.add_argument(
-        '--dollar-size',
-        type=float,
-        default=100000,
-        help='Dollar size for position sizing [default: 100000]'
-    )
+    # If --config is provided, it takes precedence over positional argument
+    if args.config_override:
+        args.config = args.config_override
+    else:
+        args.config = args.config_file
 
-    parser.add_argument(
-        '--lookback',
-        type=int,
-        default=200,
-        help='Moving average lookback period [default: 200]'
-    )
-
-    parser.add_argument(
-        '--verbose',
-        '-v',
-        action='store_true',
-        help='Enable verbose logging'
-    )
-
-    return parser.parse_args()
-
-
-def validate_date(date_string):
-    """
-    Validate date string format.
-
-    Args:
-        date_string (str): Date string to validate
-
-    Returns:
-        bool: True if valid, False otherwise
-    """
-    try:
-        datetime.strptime(date_string, '%Y-%m-%d')
-        return True
-    except ValueError:
-        return False
+    return args
 
 
 def display_performance_table(backtester, bnh_backtester):
@@ -121,18 +181,20 @@ def display_performance_table(backtester, bnh_backtester):
     Display performance metrics in a neat comparative table.
 
     Args:
-        backtester: DMA Backtester instance with completed backtest
+        backtester: Strategy Backtester instance with completed backtest
         bnh_backtester: Buy & Hold Backtester instance with completed backtest
     """
     unslipped = backtester.unslipped_performance
     slipped = backtester.slipped_performance
-    bnh = bnh_backtester.slipped_performance
+    bnh = bnh_backtester.slipped_performance if bnh_backtester else None
 
     # Define the metrics to display
-    # Split into two groups: with and without trade-related metrics
     all_metrics = [
         ('Sharpe Ratio', 'sharpe', '.3f', False),
+        ('Sharpe (Exposure)', 'sharpe_exposure', '.3f', False),
         ('Total PnL', 'total_pnl', ',.2f', False),
+        ('#Days of Exposure', 'num_exposure_days', ',.0f', False),
+        ('PnL per Exposure Day', 'pnl_per_exposure_day', ',.2f', False),
         ('Number of Trades', 'num_trades', ',.0f', True),
         ('Mean PnL per Trade', 'mean_pnl_per_trade', ',.2f', True),
         ('#Wins', 'num_wins', ',.0f', True),
@@ -152,14 +214,15 @@ def display_performance_table(backtester, bnh_backtester):
 
     # Print header
     print("=" * 100)
-    print(f"PERFORMANCE COMPARISON: {backtester.symbol}")
-    print(f"Period: {backtester.start_date} to {backtester.end_date}")
-    print(f"Dollar Size: ${backtester.dollar_size:,.2f} | Slippage: {backtester.slippage_bps} bps")
+    print(f"PERFORMANCE RESULTS")
     print("=" * 100)
     print()
 
     # Print table header
-    header = f"{'Metric':<{metric_width}} {'Unslipped':>{value_width}} {'Slipped':>{value_width}} {'Buy & Hold':>{value_width}}"
+    if bnh:
+        header = f"{'Metric':<{metric_width}} {'Unslipped':>{value_width}} {'Slipped':>{value_width}} {'Buy & Hold':>{value_width}}"
+    else:
+        header = f"{'Metric':<{metric_width}} {'Unslipped':>{value_width}} {'Slipped':>{value_width}}"
     print(header)
     print("-" * len(header))
 
@@ -167,51 +230,60 @@ def display_performance_table(backtester, bnh_backtester):
     for label, key, fmt, is_trade_metric in all_metrics:
         unslipped_val = unslipped.get(key, 0)
         slipped_val = slipped.get(key, 0)
-        bnh_val = bnh.get(key, 0)
 
         # Format values based on the format string
         if 'f' in fmt:
             # Numeric formatting
             if key in ['total_pnl', 'mean_pnl_per_trade', 'avg_pnl_win', 'avg_pnl_loss',
-                       'max_drawdown', 'drawdown_2', 'drawdown_3']:
+                       'max_drawdown', 'drawdown_2', 'drawdown_3', 'pnl_per_exposure_day']:
                 # Dollar amounts
                 unslipped_str = f"${unslipped_val:{fmt}}"
                 slipped_str = f"${slipped_val:{fmt}}"
-                bnh_str = f"${bnh_val:{fmt}}" if not is_trade_metric else "-"
             else:
                 # Non-dollar amounts
                 unslipped_str = f"{unslipped_val:{fmt}}"
                 slipped_str = f"{slipped_val:{fmt}}"
-                bnh_str = f"{bnh_val:{fmt}}" if not is_trade_metric else "-"
         else:
             unslipped_str = str(unslipped_val)
             slipped_str = str(slipped_val)
-            bnh_str = str(bnh_val) if not is_trade_metric else "-"
 
-        print(f"{label:<{metric_width}} {unslipped_str:>{value_width}} {slipped_str:>{value_width}} {bnh_str:>{value_width}}")
-
-    print("=" * 100)
-
-    # Print comparison summary
-    print()
-    print("STRATEGY COMPARISON (Slipped DMA vs Buy & Hold):")
-    print("-" * 100)
-
-    pnl_diff = slipped['total_pnl'] - bnh['total_pnl']
-    pnl_diff_pct = (pnl_diff / abs(bnh['total_pnl']) * 100) if bnh['total_pnl'] != 0 else 0
-    sharpe_diff = slipped['sharpe'] - bnh['sharpe']
-
-    print(f"  PnL Difference:     ${pnl_diff:+,.2f} ({pnl_diff_pct:+.2f}%)")
-    print(f"  Sharpe Difference:  {sharpe_diff:+.3f}")
-
-    if pnl_diff > 0:
-        print(f"  → DMA outperformed Buy & Hold")
-    elif pnl_diff < 0:
-        print(f"  → Buy & Hold outperformed DMA")
-    else:
-        print(f"  → Identical performance")
+        if bnh:
+            bnh_val = bnh.get(key, 0)
+            if 'f' in fmt:
+                if key in ['total_pnl', 'mean_pnl_per_trade', 'avg_pnl_win', 'avg_pnl_loss',
+                           'max_drawdown', 'drawdown_2', 'drawdown_3', 'pnl_per_exposure_day']:
+                    bnh_str = f"${bnh_val:{fmt}}" if not is_trade_metric else "-"
+                else:
+                    bnh_str = f"{bnh_val:{fmt}}" if not is_trade_metric else "-"
+            else:
+                bnh_str = str(bnh_val) if not is_trade_metric else "-"
+            print(f"{label:<{metric_width}} {unslipped_str:>{value_width}} {slipped_str:>{value_width}} {bnh_str:>{value_width}}")
+        else:
+            print(f"{label:<{metric_width}} {unslipped_str:>{value_width}} {slipped_str:>{value_width}}")
 
     print("=" * 100)
+
+    # Print comparison summary if benchmark exists
+    if bnh:
+        print()
+        print("STRATEGY COMPARISON (Slipped Strategy vs Buy & Hold):")
+        print("-" * 100)
+
+        pnl_diff = slipped['total_pnl'] - bnh['total_pnl']
+        pnl_diff_pct = (pnl_diff / abs(bnh['total_pnl']) * 100) if bnh['total_pnl'] != 0 else 0
+        sharpe_diff = slipped['sharpe'] - bnh['sharpe']
+
+        print(f"  PnL Difference:     ${pnl_diff:+,.2f} ({pnl_diff_pct:+.2f}%)")
+        print(f"  Sharpe Difference:  {sharpe_diff:+.3f}")
+
+        if pnl_diff > 0:
+            print(f"  → Strategy outperformed Buy & Hold")
+        elif pnl_diff < 0:
+            print(f"  → Buy & Hold outperformed Strategy")
+        else:
+            print(f"  → Identical performance")
+
+        print("=" * 100)
 
 
 def main():
@@ -221,58 +293,121 @@ def main():
     # Parse command-line arguments
     args = parse_arguments()
 
+    # Load configuration
+    try:
+        config = load_config(args.config)
+    except FileNotFoundError:
+        print(f"Error: Configuration file not found: {args.config}")
+        print(f"Please create a configuration file or specify a valid path.")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON in configuration file: {args.config}")
+        print(f"Details: {str(e)}")
+        sys.exit(1)
+
+    # Extract configuration sections
+    backtest_config = config.get('backtest', {})
+    strategy_config = config.get('strategy', {})
+    exp_mgmt_config = config.get('exposure_management', {})
+    benchmark_config = config.get('benchmark', {})
+    output_config = config.get('output', {})
+
     # Configure logging
-    log_level = logging.INFO if args.verbose else logging.WARNING
+    log_level = logging.INFO if backtest_config.get('verbose', False) else logging.ERROR
     logging.basicConfig(
         level=log_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    # Validate dates
-    if not validate_date(args.start_date):
-        print(f"Error: Invalid start date format: {args.start_date}")
-        print("Expected format: YYYY-MM-DD")
-        sys.exit(1)
-
-    if not validate_date(args.end_date):
-        print(f"Error: Invalid end date format: {args.end_date}")
-        print("Expected format: YYYY-MM-DD")
-        sys.exit(1)
-
     # Print header
     print()
-    print("=" * 80)
-    print("QUANTSTRAT BACKTEST")
-    print("=" * 80)
-    print(f"Symbol:         {args.symbol}")
-    print(f"Strategy:       {args.lookback}-Day Moving Average (DMA)")
-    print(f"Period:         {args.start_date} to {args.end_date}")
-    print(f"Dollar Size:    ${args.dollar_size:,.2f}")
-    print(f"Slippage:       {args.slippage} bps")
-    print("=" * 80)
-    print()
+    print("=" * 100)
+    print("BACKTEST CONFIGURATION")
+    print("=" * 100)
+    print(f"Config File:            {args.config}")
+    print(f"Symbol:                 {args.symbol}")
+    print(f"Period:                 {backtest_config.get('start_date', 'N/A')} to {backtest_config.get('end_date', 'N/A')}")
+    print(f"Strategy:               {strategy_config.get('name', 'N/A')}")
+    print(f"Strategy Params:        {strategy_config.get('params', {})}")
+
+    # Display entry/exit timing configuration if present
+    entry_exit_config = strategy_config.get('entry_exit_config', {})
+    if entry_exit_config:
+        # Determine entry timing
+        entry_mode = entry_exit_config.get('entry_mode', None)
+        if entry_mode:
+            if entry_mode.lower() == 'open':
+                entry_timing = "Open"
+            elif entry_mode.lower() == 'next_close':
+                entry_timing = "Next Close (lag=1)"
+            else:
+                entry_timing = "Close"
+        else:
+            # Old format
+            enter_at_open = entry_exit_config.get('enter_at_open', False)
+            enter_at_next_close = entry_exit_config.get('enter_at_next_close', False)
+            if enter_at_open:
+                entry_timing = "Open"
+            elif enter_at_next_close:
+                entry_timing = "Next Close (lag=1)"
+            else:
+                entry_timing = "Close"
+
+        exit_at_open = entry_exit_config.get('exit_at_open', False)
+        exit_timing = "Open" if exit_at_open else "Close"
+        print(f"Entry/Exit Timing:      Entry at {entry_timing}, Exit at {exit_timing}")
+
+    # Display signal configuration if present
+    signal_config = strategy_config.get('signal_config', {})
+    if signal_config:
+        freq = signal_config.get('frequency', 'daily')
+        if freq == 'weekly':
+            day = signal_config.get('day', 'monday')
+            print(f"Signal Frequency:       Weekly ({day.capitalize()})")
+        elif freq == 'monthly':
+            when = signal_config.get('when', 'end')
+            print(f"Signal Frequency:       Monthly ({when.capitalize()})")
+        else:
+            print(f"Signal Frequency:       {freq.capitalize()}")
 
     try:
-        # Create DMA strategy instance
-        strategy = DMA(lookback=args.lookback)
+        # Instantiate strategy
+        strategy = instantiate_strategy(strategy_config)
+
+        # Instantiate exposure manager
+        exp_manager = instantiate_exposure_manager(exp_mgmt_config)
+
+        # Print exposure management info
+        print(f"Exposure Management:    {exp_mgmt_config.get('name', 'N/A')}")
+        print(f"Exposure Params:        {exp_mgmt_config.get('params', {})}")
+        rebalance_config = exp_mgmt_config.get('rebalance', {})
+        if rebalance_config:
+            freq = rebalance_config.get('frequency', 'N/A')
+            when = rebalance_config.get('when', 'N/A')
+            print(f"Rebalance:              {freq.capitalize()} ({when})")
+        print(f"Slippage:               {backtest_config.get('slippage_bps', 5.0)} bps")
+        print("=" * 100)
+        print()
+
+        # Import Backtester here to avoid circular imports
+        from libs.backtester import Backtester
 
         # Create backtester instance
-        backtester = Backtester(strategy, dollar_size=args.dollar_size)
+        backtester = Backtester(strategy, exposure_manager=exp_manager)
 
-        # Run DMA backtest
-        print("Running DMA backtest...")
+        # Run backtest (use symbol from command line)
         backtester(
             symbol=args.symbol,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            slippage_bps=args.slippage
+            start_date=backtest_config.get('start_date', '2010-01-01'),
+            end_date=backtest_config.get('end_date', datetime.today().strftime('%Y-%m-%d')),
+            slippage_bps=backtest_config.get('slippage_bps', 5.0)
         )
 
         # Check if backtest was successful
         if backtester.slipped_performance is None:
             print()
             print("=" * 80)
-            print("ERROR: DMA backtest failed")
+            print("ERROR: Backtest failed")
             print("=" * 80)
             print()
             print("Possible reasons:")
@@ -282,43 +417,60 @@ def main():
             print()
             sys.exit(1)
 
-        # Run Buy & Hold backtest for comparison
-        print("Running Buy & Hold backtest...")
-        bnh_strategy = VolNormalizedBuyAndHold()
-        bnh_backtester = Backtester(bnh_strategy, dollar_size=args.dollar_size)
-        bnh_backtester(
-            symbol=args.symbol,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            slippage_bps=args.slippage
-        )
+        # Run benchmark if enabled
+        bnh_backtester = None
+        if benchmark_config.get('enabled', True):
+            print("Running benchmark backtest...")
+            bnh_strategy = instantiate_strategy(benchmark_config)
 
-        if bnh_backtester.slipped_performance is None:
-            print()
-            print("WARNING: Buy & Hold backtest failed, showing DMA results only")
-            print()
-            # Fall back to single-strategy display (would need original function)
-            sys.exit(1)
+            # Use same exposure management if configured
+            if benchmark_config.get('use_same_exposure_management', True):
+                bnh_exp_mgr = instantiate_exposure_manager(exp_mgmt_config)
+            else:
+                # Use benchmark-specific exposure management if provided
+                bnh_exp_config = benchmark_config.get('exposure_management', exp_mgmt_config)
+                bnh_exp_mgr = instantiate_exposure_manager(bnh_exp_config)
 
-        # Display results in a neat comparative table
+            bnh_backtester = Backtester(bnh_strategy, exposure_manager=bnh_exp_mgr)
+            bnh_backtester(
+                symbol=args.symbol,
+                start_date=backtest_config.get('start_date', '2010-01-01'),
+                end_date=backtest_config.get('end_date', datetime.today().strftime('%Y-%m-%d')),
+                slippage_bps=backtest_config.get('slippage_bps', 5.0)
+            )
+
+            if bnh_backtester.slipped_performance is None:
+                print()
+                print("WARNING: Benchmark backtest failed, showing strategy results only")
+                print()
+                bnh_backtester = None
+
+        # Display results
         print()
         display_performance_table(backtester, bnh_backtester)
         print()
 
-        # Create visualization with Buy & Hold comparison
-        strategy_name = args.lookback
-        output_filename = f"output/{args.symbol}-{strategy_name}dma.png"
-        print(f"Saving visualization to {output_filename}...")
-        backtester.visualize(output_filename, bnh_backtester=bnh_backtester)
-        print(f"Visualization saved successfully!")
-        print()
+        # Create visualization if enabled
+        if output_config.get('visualization', {}).get('enabled', True):
+            output_path = output_config.get('visualization', {}).get('output_path',
+                                                                      'output/{symbol}-{strategy_name}.png')
+            # Format the output path
+            output_filename = output_path.format(
+                symbol=args.symbol,
+                strategy_name=strategy_config.get('name', 'strategy')
+            )
+            print(f"Saving visualization to {output_filename}...")
+            backtester.visualize(output_filename, bnh_backtester=bnh_backtester)
+            print(f"Visualization saved successfully!")
+            print()
 
-    except KeyboardInterrupt:
+    except KeyError as e:
         print()
         print("=" * 80)
-        print("Backtest interrupted by user")
+        print(f"ERROR: Missing required configuration key: {str(e)}")
         print("=" * 80)
         print()
+        print("Please check your configuration file for completeness.")
         sys.exit(1)
 
     except Exception as e:
@@ -327,7 +479,7 @@ def main():
         print(f"ERROR: {str(e)}")
         print("=" * 80)
         print()
-        if args.verbose:
+        if backtest_config.get('verbose', False):
             import traceback
             traceback.print_exc()
         sys.exit(1)
