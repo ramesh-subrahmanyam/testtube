@@ -36,9 +36,29 @@ from libs.portfolio import PortfolioBacktester
 
 
 def parse_arguments():
+    """
+    Parse command-line arguments for the new configuration-based portfolio backtest.
+
+    Returns:
+        argparse.Namespace: Parsed arguments
+    """
     import argparse
     parser = argparse.ArgumentParser(
-        description='Run a portfolio backtest across multiple symbols.'
+        description='Run a portfolio backtest across multiple symbols using a configuration file.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --config config.yaml --symbols symbols.txt --start 2020-01-01 --end 2024-12-31
+  %(prog)s --config config.json --symbols symbols.txt --start 2020-01-01 --end 2024-12-31 --slippage 5
+
+Symbols File Format:
+  One symbol per line (empty lines and lines starting with # are ignored):
+  AAPL
+  MSFT
+  GOOGL
+  # This is a comment
+  TSLA
+        """
     )
     parser.add_argument(
         '--config',
@@ -82,81 +102,12 @@ def parse_arguments():
         default=None,
         help='Optional path to save the performance plot'
     )
-    return parser.parse_args()
-    """
-    Parse command-line arguments.
-
-    Returns:
-        argparse.Namespace: Parsed arguments
-    """
-    parser = argparse.ArgumentParser(
-        description='Run portfolio backtest using 200-day moving average strategy',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s symbols.txt
-  %(prog)s symbols.txt --start-date 2020-01-01
-  %(prog)s symbols.txt --start-date 2020-01-01 --end-date 2024-12-31
-  %(prog)s symbols.txt --slippage 5 --dollar-size 250000
-
-Symbols File Format:
-  One symbol per line (empty lines and lines starting with # are ignored):
-  AAPL
-  MSFT
-  GOOGL
-  # This is a comment
-  TSLA
-        """
-    )
-
-    parser.add_argument(
-        'symbols_file',
-        type=str,
-        help='Path to file containing symbols (one per line)'
-    )
-
-    parser.add_argument(
-        '--start-date',
-        type=str,
-        default='2010-01-01',
-        help='Start date for backtest (YYYY-MM-DD) [default: 2010-01-01]'
-    )
-
-    parser.add_argument(
-        '--end-date',
-        type=str,
-        default=datetime.today().strftime('%Y-%m-%d'),
-        help='End date for backtest (YYYY-MM-DD) [default: today]'
-    )
-
-    parser.add_argument(
-        '--slippage',
-        type=float,
-        default=5.0,
-        help='Slippage in basis points [default: 5]'
-    )
-
-    parser.add_argument(
-        '--dollar-size',
-        type=float,
-        default=100000,
-        help='Dollar size for position sizing per symbol [default: 100000]'
-    )
-
-    parser.add_argument(
-        '--lookback',
-        type=int,
-        default=200,
-        help='Moving average lookback period [default: 200]'
-    )
-
     parser.add_argument(
         '--verbose',
         '-v',
         action='store_true',
         help='Enable verbose logging'
     )
-
     return parser.parse_args()
 
 
@@ -295,9 +246,32 @@ def display_performance_table(portfolio):
 
 
 def main():
+    """
+    Main function to run the portfolio backtest using configuration file.
+    """
     from backtest import load_config, instantiate_strategy, instantiate_exposure_manager
     from strategies import get_strategy_class
+    
+    # Parse command-line arguments
     args = parse_arguments()
+
+    # Configure logging
+    log_level = logging.INFO if args.verbose else logging.WARNING
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    # Validate dates
+    if not validate_date(args.start):
+        print(f"Error: Invalid start date format: {args.start}")
+        print("Expected format: YYYY-MM-DD")
+        sys.exit(1)
+
+    if not validate_date(args.end):
+        print(f"Error: Invalid end date format: {args.end}")
+        print("Expected format: YYYY-MM-DD")
+        sys.exit(1)
 
     # Load configuration
     config = load_config(args.config)
@@ -319,93 +293,41 @@ def main():
     # Read symbols
     symbols = read_symbols_file(args.symbols)
 
-    # Create portfolio backtester
-    dollar_size = config.get('dollar_size', 100000)
-    portfolio = PortfolioBacktester(
-        strategy_class=strategy_class,
-        strategy_params=strategy_params,
-        dollar_size=dollar_size
-    )
-
-    # Run backtest
-    portfolio(
-        symbols=symbols,
-        start_date=args.start,
-        end_date=args.end,
-        slippage_bps=args.slippage
-    )
-
-    # Display performance
-    display_performance_table(portfolio)
-
-    # Save output if requested
-    if args.output:
-        df = portfolio.get_dataframe()
-        df.to_csv(args.output, index=False)
-        print(f"Results saved to {args.output}")
-
-    # Generate plot if requested
-    if args.plot:
-        portfolio.visualize(args.plot)
-        print(f"Plot saved to {args.plot}")
-    """
-    Main function to run the portfolio backtest.
-    """
-    # Parse command-line arguments
-    args = parse_arguments()
-
-    # Configure logging
-    log_level = logging.INFO if args.verbose else logging.WARNING
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-
-    # Validate dates
-    if not validate_date(args.start_date):
-        print(f"Error: Invalid start date format: {args.start_date}")
-        print("Expected format: YYYY-MM-DD")
-        sys.exit(1)
-
-    if not validate_date(args.end_date):
-        print(f"Error: Invalid end date format: {args.end_date}")
-        print("Expected format: YYYY-MM-DD")
-        sys.exit(1)
-
-    # Read symbols file
-    symbols = read_symbols_file(args.symbols_file)
-
     if not symbols:
         print("Error: No symbols found in file")
         sys.exit(1)
 
+    # Create portfolio backtester
+    dollar_size = config.get('dollar_size', 100000)
+    
     # Print header
     print()
     print("=" * 80)
     print("QUANTSTRAT PORTFOLIO BACKTEST")
     print("=" * 80)
     print(f"Symbols:        {', '.join(symbols)} ({len(symbols)} total)")
-    print(f"Strategy:       {args.lookback}-Day Moving Average (DMA)")
-    print(f"Period:         {args.start_date} to {args.end_date}")
-    print(f"Dollar Size:    ${args.dollar_size:,.2f} per symbol")
+    print(f"Strategy:       {strategy_name} with params {strategy_params}")
+    print(f"Period:         {args.start} to {args.end}")
+    print(f"Dollar Size:    ${dollar_size:,.2f} per symbol")
     print(f"Slippage:       {args.slippage} bps")
+    if exposure_manager:
+        print(f"Exposure Manager: {exposure_manager.__class__.__name__}")
     print("=" * 80)
     print()
 
     try:
-        # Create portfolio backtester
         portfolio = PortfolioBacktester(
-            strategy_class=DMA,
-            strategy_params={'lookback': args.lookback},
-            dollar_size=args.dollar_size
+            strategy_class=strategy_class,
+            strategy_params=strategy_params,
+            dollar_size=dollar_size
         )
 
         # Run portfolio backtest
         print("Running portfolio backtest...")
         portfolio(
             symbols=symbols,
-            start_date=args.start_date,
-            end_date=args.end_date,
+            start_date=args.start,
+            end_date=args.end,
             slippage_bps=args.slippage
         )
 
@@ -428,12 +350,23 @@ def main():
         display_performance_table(portfolio)
         print()
 
-        # Create visualization
-        output_filename = f"output/portfolio-{args.lookback}dma.png"
-        print(f"Saving visualization to {output_filename}...")
-        portfolio.visualize(output_filename)
-        print(f"Visualization saved successfully!")
-        print()
+        # Save output if requested
+        if args.output:
+            df = portfolio.get_dataframe()
+            df.to_csv(args.output, index=False)
+            print(f"Results saved to {args.output}")
+
+        # Generate plot if requested
+        if args.plot:
+            portfolio.visualize(args.plot)
+            print(f"Plot saved to {args.plot}")
+        else:
+            # Create default visualization
+            output_filename = f"output/portfolio-{strategy_name.lower()}.png"
+            print(f"Saving visualization to {output_filename}...")
+            portfolio.visualize(output_filename)
+            print(f"Visualization saved successfully!")
+            print()
 
     except KeyboardInterrupt:
         print()
