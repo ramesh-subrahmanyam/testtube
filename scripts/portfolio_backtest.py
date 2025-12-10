@@ -314,6 +314,15 @@ def main():
         print("Available strategies:", ', '.join(STRATEGY_REGISTRY.keys()))
         sys.exit(1)
     strategy_params = strategy_config.get('params', {})
+    
+    # Try to instantiate the strategy to validate parameters
+    try:
+        test_strategy = strategy_class(**strategy_params)
+        logger.info(f"Strategy {strategy_name} instantiated successfully with params {strategy_params}")
+    except Exception as e:
+        print(f"Error: Failed to instantiate strategy {strategy_name} with parameters {strategy_params}: {e}")
+        print("Please check the strategy parameters.")
+        sys.exit(1)
 
     # Instantiate exposure manager if provided
     exposure_manager = None
