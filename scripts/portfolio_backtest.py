@@ -249,7 +249,20 @@ def main():
     """
     Main function to run the portfolio backtest using configuration file.
     """
-    from backtest import load_config, instantiate_strategy, instantiate_exposure_manager
+    import sys
+    import os
+    # Add the scripts directory to the path to import from backtest
+    scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    
+    try:
+        from backtest import load_config, instantiate_strategy, instantiate_exposure_manager
+    except ImportError as e:
+        print(f"Error importing from backtest: {e}")
+        print("Make sure backtest.py is in the same directory (scripts/)")
+        sys.exit(1)
+    
     from strategies import get_strategy_class
     
     # Parse command-line arguments
@@ -316,6 +329,8 @@ def main():
     print()
 
     try:
+        # Note: PortfolioBacktester currently doesn't accept exposure_manager
+        # If needed, we may need to modify it, but for now we'll proceed without
         portfolio = PortfolioBacktester(
             strategy_class=strategy_class,
             strategy_params=strategy_params,
@@ -362,7 +377,10 @@ def main():
             print(f"Plot saved to {args.plot}")
         else:
             # Create default visualization
-            output_filename = f"output/portfolio-{strategy_name.lower()}.png"
+            # Ensure output directory exists
+            output_dir = "output"
+            os.makedirs(output_dir, exist_ok=True)
+            output_filename = f"{output_dir}/portfolio-{strategy_name.lower()}.png"
             print(f"Saving visualization to {output_filename}...")
             portfolio.visualize(output_filename)
             print(f"Visualization saved successfully!")
