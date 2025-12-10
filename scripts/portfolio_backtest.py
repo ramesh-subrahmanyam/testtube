@@ -36,6 +36,53 @@ from libs.portfolio import PortfolioBacktester
 
 
 def parse_arguments():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Run a portfolio backtest across multiple symbols.'
+    )
+    parser.add_argument(
+        '--config',
+        type=str,
+        required=True,
+        help='Path to the configuration file (YAML or JSON)'
+    )
+    parser.add_argument(
+        '--symbols',
+        type=str,
+        required=True,
+        help='Path to the file containing symbols (one per line)'
+    )
+    parser.add_argument(
+        '--start',
+        type=str,
+        required=True,
+        help='Start date (YYYY-MM-DD)'
+    )
+    parser.add_argument(
+        '--end',
+        type=str,
+        required=True,
+        help='End date (YYYY-MM-DD)'
+    )
+    parser.add_argument(
+        '--slippage',
+        type=float,
+        default=0.0,
+        help='Slippage in basis points (default: 0)'
+    )
+    parser.add_argument(
+        '--output',
+        type=str,
+        default=None,
+        help='Optional path to save the aggregated results CSV'
+    )
+    parser.add_argument(
+        '--plot',
+        type=str,
+        default=None,
+        help='Optional path to save the performance plot'
+    )
+    return parser.parse_args()
     """
     Parse command-line arguments.
 
@@ -248,6 +295,59 @@ def display_performance_table(portfolio):
 
 
 def main():
+    from backtest import load_config, instantiate_strategy, instantiate_exposure_manager
+    from strategies import get_strategy_class
+    args = parse_arguments()
+
+    # Load configuration
+    config = load_config(args.config)
+    strategy_config = config.get('strategy', {})
+    exposure_config = config.get('exposure', None)
+
+    # Get strategy class and parameters
+    strategy_name = strategy_config.get('name')
+    if not strategy_name:
+        raise ValueError("Configuration must specify a strategy name under 'strategy.name'")
+    strategy_class = get_strategy_class(strategy_name)
+    strategy_params = strategy_config.get('params', {})
+
+    # Instantiate exposure manager if provided
+    exposure_manager = None
+    if exposure_config:
+        exposure_manager = instantiate_exposure_manager(exposure_config)
+
+    # Read symbols
+    symbols = read_symbols_file(args.symbols)
+
+    # Create portfolio backtester
+    dollar_size = config.get('dollar_size', 100000)
+    portfolio = PortfolioBacktester(
+        strategy_class=strategy_class,
+        strategy_params=strategy_params,
+        dollar_size=dollar_size
+    )
+
+    # Run backtest
+    portfolio(
+        symbols=symbols,
+        start_date=args.start,
+        end_date=args.end,
+        slippage_bps=args.slippage
+    )
+
+    # Display performance
+    display_performance_table(portfolio)
+
+    # Save output if requested
+    if args.output:
+        df = portfolio.get_dataframe()
+        df.to_csv(args.output, index=False)
+        print(f"Results saved to {args.output}")
+
+    # Generate plot if requested
+    if args.plot:
+        portfolio.visualize(args.plot)
+        print(f"Plot saved to {args.plot}")
     """
     Main function to run the portfolio backtest.
     """
