@@ -40,6 +40,14 @@ def load_config(config_path):
     Returns:
         dict: Configuration dictionary
     """
+    import os
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    
+    # Check if file is empty
+    if os.path.getsize(config_path) == 0:
+        raise ValueError(f"Configuration file is empty: {config_path}")
+    
     with open(config_path, 'r') as f:
         config = json.load(f)
     return config

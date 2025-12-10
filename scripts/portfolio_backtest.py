@@ -249,6 +249,7 @@ def main():
     """
     import sys
     import os
+    import json
     # Add the scripts directory to the path to import from backtest
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     if scripts_dir not in sys.path:
@@ -285,7 +286,20 @@ def main():
         sys.exit(1)
 
     # Load configuration
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except FileNotFoundError:
+        print(f"Error: Configuration file not found: {args.config}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON in configuration file: {args.config}")
+        print(f"Details: {str(e)}")
+        print("The file may be empty or contain invalid JSON.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error loading configuration file {args.config}: {e}")
+        sys.exit(1)
+    
     strategy_config = config.get('strategy', {})
     exposure_config = config.get('exposure_management', None)
 
