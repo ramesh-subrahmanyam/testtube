@@ -195,6 +195,33 @@ class PortfolioBacktester:
         from .performance import stats
         self.portfolio_performance = stats(portfolio_df['Portfolio_PnL'])
         
+        # Aggregate wins and losses across all symbols
+        total_wins = 0
+        total_losses = 0
+        total_pnl_wins = 0.0
+        total_pnl_losses = 0.0
+        
+        for symbol in self.symbols:
+            bt = self.backtesters[symbol]
+            perf = bt.slipped_performance
+            total_wins += perf.get('num_wins', 0)
+            total_losses += perf.get('num_losses', 0)
+            total_pnl_wins += perf.get('total_pnl_wins', 0.0)
+            total_pnl_losses += perf.get('total_pnl_losses', 0.0)
+        
+        # Update portfolio performance with aggregated win/loss metrics
+        self.portfolio_performance['num_wins'] = total_wins
+        self.portfolio_performance['num_losses'] = total_losses
+        self.portfolio_performance['avg_pnl_win'] = (
+            total_pnl_wins / total_wins if total_wins > 0 else 0.0
+        )
+        self.portfolio_performance['avg_pnl_loss'] = (
+            total_pnl_losses / total_losses if total_losses > 0 else 0.0
+        )
+        # Remove days held fields since they're not needed
+        self.portfolio_performance['days_held_wins'] = 0.0
+        self.portfolio_performance['days_held_losses'] = 0.0
+        
         # Calculate exposure-based metrics
         # Align all position series to the same index (portfolio_df index)
         aligned_positions = []
@@ -278,15 +305,16 @@ class PortfolioBacktester:
         port = self.portfolio_performance
         lines.append(f"Total P&L:              ${port['total_pnl']:,.2f}")
         lines.append(f"Sharpe Ratio:           {port['sharpe']:.3f}")
+        lines.append(f"Sharpe (Exposure):      {port.get('sharpe_exposure', 0):.3f}")
         lines.append(f"Number of Trades:       {port['num_trades']:,}")
         lines.append(f"Mean P&L per Trade:     ${port['mean_pnl_per_trade']:,.2f}")
         lines.append(f"Number of Wins:         {port['num_wins']:,}")
         lines.append(f"Average P&L per Win:    ${port['avg_pnl_win']:,.2f}")
-        lines.append(f"Days Held (Wins):       {port['days_held_wins']:.1f}")
         lines.append(f"Number of Losses:       {port['num_losses']:,}")
         lines.append(f"Average P&L per Loss:   ${port['avg_pnl_loss']:,.2f}")
-        lines.append(f"Days Held (Losses):     {port['days_held_losses']:.1f}")
         lines.append(f"Max Drawdown:           ${port['max_drawdown']:,.2f}")
+        lines.append(f"#Days of Exposure:      {port.get('num_exposure_days', 0):,}")
+        lines.append(f"PnL per Exposure Day:   ${port.get('pnl_per_exposure_day', 0):,.2f}")
 
         lines.append("=" * 80)
 
