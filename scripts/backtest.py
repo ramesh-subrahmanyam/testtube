@@ -78,23 +78,23 @@ def instantiate_strategy(strategy_config):
     # If entry_mode is specified, use it (new format)
     if entry_mode:
         entry_mode = entry_mode.lower()
-        if entry_mode == 'open':
-            strategy = strategy.enter_at_open()
+        if entry_mode == 'open' or entry_mode == 'next_open':
+            strategy = strategy.enter_at_next_open()
         elif entry_mode == 'next_close':
             strategy = strategy.enter_at_next_close()
         elif entry_mode == 'close':
             pass  # Default behavior
         else:
-            raise ValueError(f"Invalid entry_mode: {entry_mode}. Must be 'close', 'open', or 'next_close'")
+            raise ValueError(f"Invalid entry_mode: {entry_mode}. Must be 'close', 'open', 'next_open', or 'next_close'")
     else:
         # Old format: use boolean flags
         if enter_at_open:
-            strategy = strategy.enter_at_open()
+            strategy = strategy.enter_at_next_open()
         if enter_at_next_close:
             strategy = strategy.enter_at_next_close()
 
     if exit_at_open:
-        strategy = strategy.exit_at_open()
+        strategy = strategy.exit_at_next_open()
 
     # Apply signal configuration if present
     signal_config = strategy_config.get('signal_config', {})
@@ -344,9 +344,10 @@ def main():
         # Determine entry timing
         entry_mode = entry_exit_config.get('entry_mode', None)
         if entry_mode:
-            if entry_mode.lower() == 'open':
-                entry_timing = "Open"
-            elif entry_mode.lower() == 'next_close':
+            entry_mode_lower = entry_mode.lower()
+            if entry_mode_lower == 'open' or entry_mode_lower == 'next_open':
+                entry_timing = "Next Open"
+            elif entry_mode_lower == 'next_close':
                 entry_timing = "Next Close (lag=1)"
             else:
                 entry_timing = "Close"
@@ -355,14 +356,14 @@ def main():
             enter_at_open = entry_exit_config.get('enter_at_open', False)
             enter_at_next_close = entry_exit_config.get('enter_at_next_close', False)
             if enter_at_open:
-                entry_timing = "Open"
+                entry_timing = "Next Open"
             elif enter_at_next_close:
                 entry_timing = "Next Close (lag=1)"
             else:
                 entry_timing = "Close"
 
         exit_at_open = entry_exit_config.get('exit_at_open', False)
-        exit_timing = "Open" if exit_at_open else "Close"
+        exit_timing = "Next Open" if exit_at_open else "Close"
         print(f"Entry/Exit Timing:      Entry at {entry_timing}, Exit at {exit_timing}")
 
     # Display signal configuration if present
