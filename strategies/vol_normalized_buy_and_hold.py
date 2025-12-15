@@ -11,6 +11,7 @@ volatility normalization methodology.
 """
 
 import pandas as pd
+import numpy as np
 import logging
 from .base import BaseStrategy
 
@@ -75,7 +76,7 @@ class VolNormalizedBuyAndHold(BaseStrategy):
             prices (pd.DataFrame): Price data with OHLCV columns
 
         Returns:
-            pd.DataFrame: DataFrame with Close, Signal, and Position columns
+            pd.DataFrame: DataFrame with Signal, Target_Position, and Position_At_Close columns
                          All signals and positions are 1 (long)
 
         Implementation:
@@ -86,8 +87,24 @@ class VolNormalizedBuyAndHold(BaseStrategy):
         df = prices.copy()
 
         # Always long (signal = 1) for every date
-        df['Signal'] = 1
-        df['Position'] = 1
+        df['Signal'] = 1.0
+
+        # Set Target_Position only on first day (entry day)
+        df['Target_Position'] = np.nan
+        df.iloc[0, df.columns.get_loc('Target_Position')] = 1
+
+        # Position at close is always 1
+        df['Position_At_Close'] = 1
+
+        # Add default entry/exit timing metadata
+        df['Entry_Time'] = 'close'
+        df['Entry_Price'] = df['Close']
+        df['Exit_Time'] = 'close'
+        df['Exit_Price'] = df['Close']
+
+        # Mark exposure days: for entry at close, exposure starts next day
+        # For buy & hold, all days after entry are exposure days
+        df['Is_Exposure_Day'] = df['Position_At_Close'].shift(1).fillna(0) != 0
 
         # Return only the strategy period
         result = df.loc[self.start_date:self.end_date]
