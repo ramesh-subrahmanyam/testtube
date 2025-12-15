@@ -13,8 +13,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from strategies.base import BaseStrategy
-from signals.technical import sma
+from signals.technical import SMA
 import pandas as pd
+import numpy as np
 import logging
 
 logger = logging.getLogger(__name__)
@@ -54,34 +55,47 @@ class DMA(BaseStrategy):
             prices (pd.DataFrame): OHLCV data with DatetimeIndex
 
         Returns:
-            pd.DataFrame: DataFrame with Close, DMA, Signal, and Position columns
+            pd.DataFrame: DataFrame with Close, DMA, Signal, Target_Position, Position_At_Close columns
         """
         df = prices.copy()
 
-        # Calculate N-day moving average using sma signal function
-        # sma now takes symbol, period, and price_series
-        df[f'DMA'] = sma(self.symbol, self.lookback, df['Close'])
-
-        # Initialize Signal column
-        df['Signal'] = 0
+        # Calculate N-day moving average using SMA factory function
+        sma_func = SMA(self.lookback)
+        df[f'DMA'] = sma_func(self.symbol, df['Close'])
 
         # Generate signals based on yesterday's price vs N-day MA
         # We use yesterday's close to determine today's position
         df['Prev_Close'] = df['Close'].shift(1)
 
-        # Position = 1 if yesterday's close > N-day MA, else 0
-        df.loc[df['Prev_Close'] > df['DMA'], 'Signal'] = 1
-        df.loc[df['Prev_Close'] <= df['DMA'], 'Signal'] = 0
+        # Real-valued signal: distance from MA as percentage
+        df['Signal'] = (df['Prev_Close'] - df['DMA']) / df['DMA']
 
-        # Position equals signal for this strategy
-        df['Position'] = df['Signal']
+        # Convert to discrete positions first
+        df['_temp_position'] = 0
+        df.loc[df['Prev_Close'] > df['DMA'], '_temp_position'] = 1
+        df.loc[df['Prev_Close'] <= df['DMA'], '_temp_position'] = 0
+
+        # Only set Target_Position when it CHANGES from prior day
+        df['Target_Position'] = pd.NA
+        position_changes = df['_temp_position'] != df['_temp_position'].shift(1)
+        df.loc[position_changes, 'Target_Position'] = df.loc[position_changes, '_temp_position']
+
+        # Forward-fill to get position at close every day
+        df['Position_At_Close'] = df['Target_Position'].ffill().fillna(0)
+
+        # Drop temporary column
+        df.drop(columns=['_temp_position'], inplace=True)
+
+        # Default entry timing
+        df['Entry_Time'] = 'close'
+        df['Entry_Price'] = df['Close']
 
         # Return only the strategy period (after indicators are calculated)
         result = df.loc[self.start_date:self.end_date]
 
         logger.info(f"Generated {len(result)} signals for DMA strategy (lookback={self.lookback})")
-        logger.info(f"Long positions: {(result['Position'] == 1).sum()}")
-        logger.info(f"Flat positions: {(result['Position'] == 0).sum()}")
+        logger.info(f"Long positions: {(result['Position_At_Close'] == 1).sum()}")
+        logger.info(f"Flat positions: {(result['Position_At_Close'] == 0).sum()}")
 
         return result
 
