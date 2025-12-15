@@ -133,15 +133,12 @@ class Backtester:
 
         df = self.strategy.df.copy()
 
-        # Step 2 & 3: Calculate exposure-adjusted positions
+        # Step 2 & 3: Calculate exposure multiplier
         if self.exposure_manager is not None:
             # Use ExposureManager object to calculate multiplier
             logger.info(f"Using ExposureManager {self.exposure_manager.__class__.__name__} to calculate exposure multiplier...")
             multiplier = self.exposure_manager(df)
             df['Exposure_Multiplier'] = multiplier
-
-            # Exposure-adjusted position = position × multiplier
-            df['Exposure_Adjusted_Position'] = df['Position'] * multiplier
 
             # Calculate dollar volatility for reporting purposes
             df['Dollar_Volatility'] = (df['Volatility'] / 100) * df['Close']
@@ -155,141 +152,110 @@ class Backtester:
             # Handle division by zero or NaN
             df['Dollar_Volatility'] = df['Dollar_Volatility'].replace(0, np.nan)
 
-            # Calculate vol-adjusted positions (vectorized)
-            # Position = position × (dollar_size / dollar_volatility)
-            logger.info("Calculating exposure-adjusted positions...")
+            # Calculate exposure multiplier (vectorized)
+            # multiplier = dollar_size / dollar_volatility
+            logger.info("Calculating exposure multiplier...")
             df['Exposure_Multiplier'] = self.dollar_size / df['Dollar_Volatility']
-            df['Exposure_Adjusted_Position'] = df['Position'] * df['Exposure_Multiplier']
 
-            # Fill NaN positions with 0
-            df['Exposure_Adjusted_Position'] = df['Exposure_Adjusted_Position'].fillna(0)
+            # Fill NaN multiplier with 0
+            df['Exposure_Multiplier'] = df['Exposure_Multiplier'].fillna(0)
 
-        # Step 4: Calculate unslipped PnL (vectorized)
-        # Daily return
-        df['Return'] = df['Close'].pct_change()
+        # Step 4: Calculate target shares and shares held
+        # NEW SCHEMA: Use Position_At_Close and Exposure_Multiplier
 
-        # Lag positions by 1 day (today's position applies to tomorrow's return)
-        df['Lagged_Position'] = df['Exposure_Adjusted_Position'].shift(1).fillna(0)
+        # Shares target at close of each day (what we want to have at close)
+        df['Shares_Target'] = df['Position_At_Close'] * df['Exposure_Multiplier']
 
-        # Check if strategy uses enter_at_open, enter_at_next_close, or exit_at_open
-        enter_at_open = hasattr(self.strategy, '_enter_at_open') and self.strategy._enter_at_open
-        enter_at_next_close = hasattr(self.strategy, '_enter_at_next_close') and self.strategy._enter_at_next_close
-        exit_at_open = hasattr(self.strategy, '_exit_at_open') and self.strategy._exit_at_open
+        # Shares held at open (lagged from prior close)
+        df['Shares_Held_At_Open'] = df['Shares_Target'].shift(1).fillna(0)
 
-        # Validate: cannot use both enter_at_next_close and enter_at_open
-        if enter_at_next_close and enter_at_open:
-            logger.error("Cannot use both enter_at_next_close() and enter_at_open() together")
-            raise ValueError("Cannot use both enter_at_next_close() and enter_at_open() together. Choose one entry method.")
+        # Step 5: Calculate price changes based on entry/exit timing
+        # Default: Close[T] - Close[T-1]
+        df['Price_Change'] = df['Close'].diff()
 
-        if enter_at_open or enter_at_next_close or exit_at_open:
-            if enter_at_open:
-                logger.info("Using enter_at_open: entries at next day's open price")
-            if enter_at_next_close:
-                logger.info("Using enter_at_next_close: entries at next day's close price (lag=1)")
-            if exit_at_open:
-                logger.info("Using exit_at_open: exits at next day's open price")
+        # Detect entry/exit events
+        position_at_prior_close = df['Position_At_Close'].shift(1).fillna(0)
+        is_entry = (position_at_prior_close == 0) & (df['Position_At_Close'] != 0)
+        is_exit = (position_at_prior_close != 0) & (df['Position_At_Close'] == 0)
 
-            # Detect entry and exit points
-            lagged_position_was_zero = df['Lagged_Position'].shift(1).fillna(0) == 0
-            lagged_position_is_nonzero = df['Lagged_Position'] != 0
-            lagged_position_was_nonzero = df['Lagged_Position'].shift(1).fillna(0) != 0
-            lagged_position_is_zero = df['Lagged_Position'] == 0
+        # Adjust price changes based on Entry_Time from modifiers
+        for idx in df.index[is_entry]:
+            idx_loc = df.index.get_loc(idx)
+            if idx_loc > 0:
+                prev_idx = df.index[idx_loc - 1]
+                entry_time = df.loc[prev_idx, 'Entry_Time']
 
-            is_entry = lagged_position_was_zero & lagged_position_is_nonzero
-            is_exit = lagged_position_was_nonzero & lagged_position_is_zero
+                if entry_time == 'next_open':
+                    # Entry at next open: Price_Change = Close[T] - Open[T]
+                    df.loc[idx, 'Price_Change'] = df.loc[idx, 'Close'] - df.loc[idx, 'Open']
+                elif entry_time == 'next_close':
+                    # Entry at next close: No PnL on entry day
+                    df.loc[idx, 'Price_Change'] = 0
+                # else: entry_time == 'close' (default), no change needed
 
-            # Calculate price change: default is Close[T] - Close[T-1]
-            df['Price_Change'] = df['Close'].diff()
+        # Handle exit timing if Exit_Time column exists
+        if 'Exit_Time' in df.columns:
+            for idx in df.index[is_exit]:
+                idx_loc = df.index.get_loc(idx)
+                if idx_loc > 0:
+                    prev_idx = df.index[idx_loc - 1]
+                    exit_time = df.loc[prev_idx, 'Exit_Time'] if 'Exit_Time' in df.columns else 'close'
 
-            # Adjust entry days if enter_at_open
-            if enter_at_open:
-                # Entry PnL = lagged_position × (Close[T] - Open[T])
-                df.loc[is_entry, 'Price_Change'] = df.loc[is_entry, 'Close'] - df.loc[is_entry, 'Open']
-
-            # Adjust entry days if enter_at_next_close
-            if enter_at_next_close:
-                # Entry happens at next close (T+1) instead of current close (T)
-                # So on the entry day T, we have NO PnL (Price_Change = 0)
-                # The first PnL happens on day T+1: Close[T+1] - Close[T]
-                # But since lagged_position is already shifted, on day T+1 we have the position
-                # and the normal calculation gives us: position × (Close[T+1] - Close[T])
-                # So we just need to zero out the PnL on the entry signal day (T)
-                df.loc[is_entry, 'Price_Change'] = 0
-
-            # Adjust exit days if exit_at_open
-            if exit_at_open:
-                # Exit PnL = lagged_position × (Open[T] - Close[T-1])
-                # Find where the ACTUAL position (not lagged) goes to zero
-                actual_position_was_nonzero = df['Exposure_Adjusted_Position'].shift(1).fillna(0) != 0
-                actual_position_is_zero = df['Exposure_Adjusted_Position'] == 0
-                is_exit_day = actual_position_was_nonzero & actual_position_is_zero
-
-                # On the exit day, we extend PnL to the next open
-                # Adjust price change for exit days to use next open: Open[T] - Close[T-1]
-                for idx in df.index[is_exit_day]:
-                    idx_loc = df.index.get_loc(idx)
-                    if idx_loc > 0:
-                        prev_idx = df.index[idx_loc - 1]
+                    if exit_time == 'next_open':
+                        # Exit at next open: extend position to open
+                        # Price_Change = Open[T] - Close[T-1]
                         prev_close = df.loc[prev_idx, 'Close']
                         curr_open = df.loc[idx, 'Open']
                         df.loc[idx, 'Price_Change'] = curr_open - prev_close
 
-                        # Extend the lagged position for this day (was 0, should be prev day's position)
-                        prev_lagged_pos = df.iloc[idx_loc - 1]['Lagged_Position']
-                        df.loc[idx, 'Lagged_Position'] = prev_lagged_pos
+                        # Extend shares held
+                        df.loc[idx, 'Shares_Held_At_Open'] = df.loc[prev_idx, 'Shares_Target']
 
-            # Calculate unslipped PnL
-            df['Unslipped_PnL'] = df['Lagged_Position'] * df['Price_Change']
-        else:
-            # Default behavior: entry at close price
-            # Unslipped PnL = lagged_position × (price_change)
-            df['Price_Change'] = df['Close'].diff()
-            df['Unslipped_PnL'] = df['Lagged_Position'] * df['Price_Change']
+        # Step 6: Calculate unslipped PnL
+        df['Unslipped_PnL'] = df['Shares_Held_At_Open'] * df['Price_Change']
 
         # Fill NaN with 0 (first day)
         df['Unslipped_PnL'] = df['Unslipped_PnL'].fillna(0)
 
         logger.info("Calculated unslipped PnL")
 
-        # Step 5: Calculate slippage (vectorized)
-        # Slippage = |position_change| × price × slippage_bps / 10000
+        # Step 7: Calculate slippage (vectorized)
+        # Slippage = |shares_change| × price × slippage_bps / 10000
         # Note: slippage_bps / 10000 converts basis points to decimal
         # Example: 5 bps = 5/10000 = 0.0005 = 0.05%
 
         logger.info(f"Calculating slippage ({slippage_bps} bps)...")
 
-        # Position change from previous day
-        df['Position_Change'] = df['Exposure_Adjusted_Position'].diff().fillna(0)
+        # Shares change from previous day
+        df['Shares_Change'] = df['Shares_Target'].diff().fillna(0)
 
-        # Calculate slippage price (Close by default, Open for enter_at_open/exit_at_open)
-        if enter_at_open or enter_at_next_close or exit_at_open:
-            df['Slippage_Price'] = df['Close'].copy()
+        # Calculate slippage price (Close by default)
+        df['Slippage_Price'] = df['Close'].copy()
 
-            if enter_at_open:
-                # For enter_at_open: use Open price for entry slippage
-                position_was_zero = df['Exposure_Adjusted_Position'].shift(1).fillna(0) == 0
-                position_is_nonzero = df['Exposure_Adjusted_Position'] != 0
-                is_entry = position_was_zero & position_is_nonzero
-                df.loc[is_entry, 'Slippage_Price'] = df.loc[is_entry, 'Open']
+        # Adjust slippage price for entry/exit timing
+        for idx in df.index[is_entry]:
+            idx_loc = df.index.get_loc(idx)
+            if idx_loc > 0:
+                prev_idx = df.index[idx_loc - 1]
+                entry_time = df.loc[prev_idx, 'Entry_Time']
 
-            if enter_at_next_close:
-                # For enter_at_next_close: slippage still occurs at Close price
-                # but on the day AFTER the signal (when we actually enter)
-                # The position change happens on signal day, so slippage uses Close price
-                # No special handling needed - slippage naturally occurs at Close
-                pass
+                if entry_time == 'next_open':
+                    # Entry at open: slippage at open price
+                    df.loc[idx, 'Slippage_Price'] = df.loc[idx, 'Open']
 
-            if exit_at_open:
-                # For exit_at_open: use Open price for exit slippage
-                actual_position_was_nonzero = df['Exposure_Adjusted_Position'].shift(1).fillna(0) != 0
-                actual_position_is_zero = df['Exposure_Adjusted_Position'] == 0
-                is_exit_day = actual_position_was_nonzero & actual_position_is_zero
-                df.loc[is_exit_day, 'Slippage_Price'] = df.loc[is_exit_day, 'Open']
+        if 'Exit_Time' in df.columns:
+            for idx in df.index[is_exit]:
+                idx_loc = df.index.get_loc(idx)
+                if idx_loc > 0:
+                    prev_idx = df.index[idx_loc - 1]
+                    exit_time = df.loc[prev_idx, 'Exit_Time'] if 'Exit_Time' in df.columns else 'close'
 
-            df['Slippage'] = np.abs(df['Position_Change']) * df['Slippage_Price'] * (slippage_bps / 10000)
-        else:
-            # Default: use Close price for all slippage
-            df['Slippage'] = np.abs(df['Position_Change']) * df['Close'] * (slippage_bps / 10000)
+                    if exit_time == 'next_open':
+                        # Exit at open: slippage at open price
+                        df.loc[idx, 'Slippage_Price'] = df.loc[idx, 'Open']
+
+        # Calculate slippage
+        df['Slippage'] = np.abs(df['Shares_Change']) * df['Slippage_Price'] * (slippage_bps / 10000)
 
         # Step 6: Calculate slipped PnL (vectorized)
         df['Slipped_PnL'] = df['Unslipped_PnL'] - df['Slippage']
@@ -300,19 +266,27 @@ class Backtester:
         df['Cumulative_Unslipped_PnL'] = df['Unslipped_PnL'].cumsum()
         df['Cumulative_Slipped_PnL'] = df['Slipped_PnL'].cumsum()
 
+        # Step 8: Mark exposure days based on non-zero PnL
+        # Any day with PnL (unslipped or slipped) is by definition an exposure day
+        # This correctly captures entry days, holding days, AND exit days
+        df['Is_Exposure_Day'] = (df['Unslipped_PnL'] != 0) | (df['Slipped_PnL'] != 0)
+
         # Store the enhanced dataframe back
         self.strategy.df = df
 
-        # Step 8: Calculate performance statistics
+        # Step 9: Calculate performance statistics
         logger.info("Calculating performance statistics...")
 
+        # Use Is_Exposure_Day calculated above
+        exposure_days = df['Is_Exposure_Day']
+
         # Unslipped performance
-        self.unslipped_performance = stats(df['Unslipped_PnL'], df['Position'])
+        self.unslipped_performance = stats(df['Unslipped_PnL'], df['Position_At_Close'], exposure_days)
         logger.info(f"Unslipped - Sharpe: {self.unslipped_performance['sharpe']:.3f}, "
                    f"Total PnL: ${self.unslipped_performance['total_pnl']:,.2f}")
 
         # Slipped performance
-        self.slipped_performance = stats(df['Slipped_PnL'], df['Position'])
+        self.slipped_performance = stats(df['Slipped_PnL'], df['Position_At_Close'], exposure_days)
         logger.info(f"Slipped - Sharpe: {self.slipped_performance['sharpe']:.3f}, "
                    f"Total PnL: ${self.slipped_performance['total_pnl']:,.2f}")
 
@@ -410,10 +384,12 @@ class Backtester:
 
         df = self.strategy.df
 
-        # Check if strategy uses enter_at_open or exit_at_open
-        use_open_entry = hasattr(self.strategy, '_enter_at_open') and self.strategy._enter_at_open
-        use_open_exit = hasattr(self.strategy, '_exit_at_open') and self.strategy._exit_at_open
+        # NEW SCHEMA: Check Entry_Time and Exit_Time columns to determine pricing
+        # Note: extract_trades will need to be updated to handle new schema
+        use_open_entry = False
+        use_open_exit = False
 
+        # For now, pass False - we'll update extract_trades later if needed
         # Extract trades
         trades_df = extract_trades(df, use_open_for_entry=use_open_entry, use_open_for_exit=use_open_exit)
 
@@ -627,8 +603,8 @@ if __name__ == "__main__":
 
     df = backtester.get_dataframe()
     if df is not None:
-        cols = ['Close', 'Volatility', 'Dollar_Volatility', 'Position',
-                'Exposure_Adjusted_Position', 'Unslipped_PnL', 'Slippage', 'Slipped_PnL']
+        cols = ['Close', 'Volatility', 'Dollar_Volatility', 'Position_At_Close',
+                'Shares_Target', 'Unslipped_PnL', 'Slippage', 'Slipped_PnL']
         print(df[cols].tail(10).to_string())
 
     # Example 4: Different dollar sizes
