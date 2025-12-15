@@ -1,4 +1,4 @@
-# Quantstrat - Backtesting Engine
+# Testtube - Backtesting Engine
 
 A backtesting engine for daily price series with intelligent caching and flexible strategy framework.
 
