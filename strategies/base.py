@@ -8,6 +8,7 @@ required abstract methods.
 
 from abc import ABC, abstractmethod
 import pandas as pd
+import numpy as np
 import logging
 from datetime import datetime
 
@@ -177,19 +178,25 @@ class BaseStrategy(ABC):
 
         This is the core strategy logic that must be implemented by subclasses.
 
+        NEW SCHEMA: Strategies must now return:
+        - Signal: Real-valued signal (can be any float, not just -1/0/1)
+        - Target_Position: Discrete target position (typically -1/0/1), set ONLY on signal days
+        - Position_At_Close: Actual position at close (calculated from Target_Position)
+        - Entry_Time: 'close' (default), will be modified by modifiers
+        - Entry_Price: Price at which entry occurs (Close by default)
+
         Args:
             prices (pd.DataFrame): OHLCV data with DatetimeIndex
 
         Returns:
             pd.DataFrame: DataFrame with at minimum:
                 - Date (index): Trading date
-                - Close: Closing price
-                - Signal: 1 (long), 0 (flat), -1 (short)
-                - Position: Actual position taken
-
-        The Signal column represents the strategy's intent, while Position
-        represents the actual position (which may differ due to execution rules,
-        position limits, etc.).
+                - OHLCV columns
+                - Signal: Real-valued signal
+                - Target_Position: Discrete position (set only on signal days, NaN otherwise)
+                - Position_At_Close: Actual position at close of each day
+                - Entry_Time: Entry timing ('close', 'next_open', etc.)
+                - Entry_Price: Entry price
 
         Example implementation:
             def generate_signals(self, prices):
@@ -197,15 +204,22 @@ class BaseStrategy(ABC):
                 df['MA20'] = df['Close'].rolling(20).mean()
                 df['MA50'] = df['Close'].rolling(50).mean()
 
-                # Generate signals
-                df['Signal'] = 0
-                df.loc[df['MA20'] > df['MA50'], 'Signal'] = 1  # Long
-                df.loc[df['MA20'] < df['MA50'], 'Signal'] = -1  # Short
+                # Generate real-valued signal
+                df['Signal'] = (df['MA20'] - df['MA50']) / df['MA50']
 
-                # Position = Signal for this simple strategy
-                df['Position'] = df['Signal']
+                # Convert to discrete target positions (set only when signal changes)
+                df['Target_Position'] = np.nan
+                df.loc[df['Signal'] > 0, 'Target_Position'] = 1
+                df.loc[df['Signal'] < 0, 'Target_Position'] = -1
+                df.loc[df['Signal'] == 0, 'Target_Position'] = 0
 
-                # Return only the strategy period
+                # Forward-fill to get position at close
+                df['Position_At_Close'] = df['Target_Position'].fillna(method='ffill').fillna(0)
+
+                # Default entry timing
+                df['Entry_Time'] = 'close'
+                df['Entry_Price'] = df['Close']
+
                 return df.loc[self.start_date:self.end_date]
         """
         pass
@@ -243,8 +257,8 @@ class BaseStrategy(ABC):
         Validate that signals DataFrame has required columns and handle NaNs.
 
         This method:
-        1. Checks for required columns
-        2. Validates signal values are in [-1, 0, 1]
+        1. Checks for required columns (new schema)
+        2. Validates signal values
         3. Handles NaNs in the Signal column:
            - Excludes initial warm-up period NaNs
            - Fails if NaNs exist in the middle of the signal series
@@ -256,7 +270,7 @@ class BaseStrategy(ABC):
         Returns:
             bool: True if valid, False otherwise
         """
-        required_columns = ['Close', 'Signal', 'Position']
+        required_columns = ['Close', 'Signal', 'Target_Position', 'Position_At_Close', 'Entry_Time', 'Entry_Price']
 
         for col in required_columns:
             if col not in signals.columns:
@@ -294,15 +308,17 @@ class BaseStrategy(ABC):
             warmup_nan_count = signal_nans.sum()
             logger.info(f"Excluding {warmup_nan_count} initial NaN values from warm-up period")
 
-        # Check Signal values are valid (excluding NaNs)
-        valid_signals = signals['Signal'].dropna().isin([-1, 0, 1])
-        if not valid_signals.all():
-            logger.warning(f"Some signals are not in [-1, 0, 1]")
+        # Note: Signal is now real-valued, so we don't check for [-1, 0, 1]
+        # Just ensure it's numeric
+        if not pd.api.types.is_numeric_dtype(signals['Signal']):
+            logger.error("Signal column must be numeric")
+            return False
 
-        # Check Position values are valid (excluding NaNs)
-        valid_positions = signals['Position'].dropna().isin([-1, 0, 1])
-        if not valid_positions.all():
-            logger.warning(f"Some positions are not in [-1, 0, 1]")
+        # Check Position_At_Close values are valid (excluding NaNs)
+        # Allow any numeric value (not restricted to -1, 0, 1 anymore)
+        if not pd.api.types.is_numeric_dtype(signals['Position_At_Close']):
+            logger.error("Position_At_Close column must be numeric")
+            return False
 
         return True
 
@@ -357,6 +373,176 @@ class BaseStrategy(ABC):
         print(f"\n⚠️  ERROR: NaN values detected in signal series!")
         print(f"    Error file created: {error_filename}\n")
 
+    # =============================================================================
+    # Strategy Modifier Methods (Fluent API)
+    # =============================================================================
+
+    def enter_at_next_open(self):
+        """
+        Wrap strategy to enter positions at next day's open price.
+
+        Returns a EnterAtNextOpen modifier wrapping this strategy.
+
+        Returns:
+            EnterAtNextOpen: Wrapped strategy
+
+        Example:
+            strategy = DMA(200).enter_at_next_open()
+        """
+        from strategies.modifiers import EnterAtNextOpen
+        return EnterAtNextOpen(self)
+
+    def enter_at_next_close(self):
+        """
+        Wrap strategy to enter positions at next day's close price.
+
+        Returns a EnterAtNextClose modifier wrapping this strategy.
+
+        Returns:
+            EnterAtNextClose: Wrapped strategy
+
+        Example:
+            strategy = DMA(200).enter_at_next_close()
+        """
+        from strategies.modifiers import EnterAtNextClose
+        return EnterAtNextClose(self)
+
+    def exit_at_next_open(self):
+        """
+        Wrap strategy to exit positions at next day's open price.
+
+        Returns a ExitAtNextOpen modifier wrapping this strategy.
+
+        Returns:
+            ExitAtNextOpen: Wrapped strategy
+
+        Example:
+            strategy = DMA(200).exit_at_next_open()
+        """
+        from strategies.modifiers import ExitAtNextOpen
+        return ExitAtNextOpen(self)
+
+    def cap_position(self, max_position):
+        """
+        Wrap strategy to cap position sizes at a maximum value.
+
+        Args:
+            max_position (float): Maximum absolute position size
+
+        Returns:
+            CapPosition: Wrapped strategy
+
+        Example:
+            strategy = DMA(200).cap_position(1.0)
+        """
+        from strategies.modifiers import CapPosition
+        return CapPosition(self, max_position)
+
+    def only_on_days(self, allowed_days):
+        """
+        Wrap strategy to only trade on specific days of the week.
+
+        Args:
+            allowed_days (list): List of day names (e.g., ['Monday', 'Friday'])
+
+        Returns:
+            TradeOnlyOnDays: Wrapped strategy
+
+        Example:
+            strategy = DMA(200).only_on_days(['Monday', 'Wednesday', 'Friday'])
+        """
+        from strategies.modifiers import TradeOnlyOnDays
+        return TradeOnlyOnDays(self, allowed_days)
+
+    def minimum_signal_strength(self, min_strength):
+        """
+        Wrap strategy to filter out weak signals.
+
+        Args:
+            min_strength (float): Minimum absolute signal strength
+
+        Returns:
+            MinimumSignalStrength: Wrapped strategy
+
+        Example:
+            strategy = MyStrategy().minimum_signal_strength(0.1)
+        """
+        from strategies.modifiers import MinimumSignalStrength
+        return MinimumSignalStrength(self, min_strength)
+
+    def with_stop_loss(self, pct):
+        """
+        Wrap strategy with a stop loss.
+
+        Args:
+            pct (float): Stop loss percentage (e.g., 2.0 = 2%)
+
+        Returns:
+            WithStopLoss: Wrapped strategy
+
+        Example:
+            strategy = DMA(200).with_stop_loss(pct=2.0)
+        """
+        from strategies.modifiers import WithStopLoss
+        return WithStopLoss(self, pct)
+
+    def with_take_profit(self, pct):
+        """
+        Wrap strategy with a take profit target.
+
+        Args:
+            pct (float): Take profit percentage (e.g., 5.0 = 5%)
+
+        Returns:
+            WithTakeProfit: Wrapped strategy
+
+        Example:
+            strategy = DMA(200).with_take_profit(pct=5.0)
+        """
+        from strategies.modifiers import WithTakeProfit
+        return WithTakeProfit(self, pct)
+
+    def limit_order(self, limit_pct):
+        """
+        Wrap strategy to use limit orders instead of market orders.
+
+        Args:
+            limit_pct (float): Limit percentage (e.g., 0.5 = 0.5% below for long)
+
+        Returns:
+            LimitOrder: Wrapped strategy
+
+        Example:
+            strategy = DMA(200).limit_order(limit_pct=0.5)
+        """
+        from strategies.modifiers import LimitOrder
+        return LimitOrder(self, limit_pct)
+
+    def periodic(self, frequency='daily', when='end', day=None):
+        """
+        Wrap this strategy with periodic signal updates.
+
+        This causes the strategy to only update its positions on specific dates
+        (e.g., monthly rebalancing) rather than daily.
+
+        Args:
+            frequency (str): Update frequency - "daily", "weekly", "monthly"
+            when (str): Update at period "start" or "end"
+            day (str, optional): For weekly - day of week
+
+        Returns:
+            PeriodicStrategy: Wrapped strategy with periodic updates
+
+        Example:
+            # Monthly rebalancing at start of month
+            strategy = MyStrategy().periodic(frequency="monthly", when="start")
+
+            # Weekly rebalancing on Mondays
+            strategy = MyStrategy().periodic(frequency="weekly", day="monday")
+        """
+        from libs.periodic import PeriodicStrategy
+        return PeriodicStrategy(self, frequency=frequency, when=when, day=day)
+
     def get_parameter_summary(self):
         """
         Get a summary of strategy parameters.
@@ -383,9 +569,19 @@ class BuyAndHoldStrategy(BaseStrategy):
         """Generate signals for buy-and-hold strategy."""
         df = prices.copy()
 
-        # Always long
-        df['Signal'] = 1
-        df['Position'] = 1
+        # Always long - real-valued signal
+        df['Signal'] = 1.0
+
+        # Target position: always 1 (long) - set on first day only
+        df['Target_Position'] = np.nan
+        df.iloc[0, df.columns.get_loc('Target_Position')] = 1
+
+        # Position at close: always 1
+        df['Position_At_Close'] = 1
+
+        # Default entry timing
+        df['Entry_Time'] = 'close'
+        df['Entry_Price'] = df['Close']
 
         # Return only the strategy period
         return df.loc[self.start_date:self.end_date]
@@ -417,13 +613,28 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         df['MA_Short'] = df['Close'].rolling(window=self.short_period).mean()
         df['MA_Long'] = df['Close'].rolling(window=self.long_period).mean()
 
-        # Generate signals
-        df['Signal'] = 0
-        df.loc[df['MA_Short'] > df['MA_Long'], 'Signal'] = 1   # Long
-        df.loc[df['MA_Short'] < df['MA_Long'], 'Signal'] = -1  # Short
+        # Generate real-valued signal
+        df['Signal'] = (df['MA_Short'] - df['MA_Long']) / df['MA_Long']
 
-        # Position equals signal for this strategy
-        df['Position'] = df['Signal']
+        # Convert to discrete positions first
+        df['_temp_position'] = 0
+        df.loc[df['Signal'] > 0, '_temp_position'] = 1   # Long
+        df.loc[df['Signal'] < 0, '_temp_position'] = -1  # Short
+
+        # Only set Target_Position when it CHANGES
+        df['Target_Position'] = np.nan
+        position_changes = df['_temp_position'] != df['_temp_position'].shift(1)
+        df.loc[position_changes, 'Target_Position'] = df.loc[position_changes, '_temp_position']
+
+        # Forward-fill to get position at close
+        df['Position_At_Close'] = df['Target_Position'].ffill().fillna(0)
+
+        # Drop temporary column
+        df.drop(columns=['_temp_position'], inplace=True)
+
+        # Default entry timing
+        df['Entry_Time'] = 'close'
+        df['Entry_Price'] = df['Close']
 
         # Return only the strategy period (after indicators are calculated)
         return df.loc[self.start_date:self.end_date]
