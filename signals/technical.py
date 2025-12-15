@@ -131,6 +131,76 @@ def EMA(N):
     return compute_ema
 
 
+def RSI(N):
+    """
+    Relative Strength Index (RSI) indicator factory.
+
+    This function returns a callable that computes the N-period RSI.
+    Uses a decorator pattern to allow easy parameterization.
+
+    Args:
+        N (int): The number of periods for the RSI calculation
+
+    Returns:
+        callable: A function that takes symbol and pandas Series and returns the N-period RSI
+
+    Example:
+        >>> # Create a 14-period RSI calculator
+        >>> rsi_14 = RSI(14)
+        >>>
+        >>> # Apply it to price data
+        >>> df['RSI'] = rsi_14('AAPL', df['Close'])
+    """
+    def compute_rsi(symbol, series):
+        """
+        Compute the N-period Relative Strength Index.
+
+        Args:
+            symbol (str): Stock ticker symbol (e.g., 'AAPL')
+            series (pd.Series): Time series data (typically price data)
+
+        Returns:
+            pd.Series: N-period RSI (values between 0 and 100)
+        """
+        if not isinstance(series, pd.Series):
+            raise TypeError(f"Expected pandas Series, got {type(series)}")
+
+        # Calculate price changes
+        delta = series.diff()
+
+        # Separate gains and losses
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+
+        # Calculate average gain and loss using exponential moving average
+        avg_gain = gain.ewm(span=N, adjust=False).mean()
+        avg_loss = loss.ewm(span=N, adjust=False).mean()
+
+        # Calculate RS and RSI
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+
+        logger.debug(f"Computed {N}-period RSI for {symbol} with {len(rsi)} data points")
+
+        return rsi
+
+    # Add metadata to the function for introspection
+    compute_rsi.__name__ = f'RSI_{N}'
+    compute_rsi.__doc__ = f"""Compute {N}-period Relative Strength Index.
+
+    Args:
+        symbol (str): Stock ticker symbol
+        series (pd.Series): Time series data
+
+    Returns:
+        pd.Series: {N}-period RSI (values between 0 and 100)
+    """
+    compute_rsi.period = N
+    compute_rsi.indicator_type = 'RSI'
+
+    return compute_rsi
+
+
 if __name__ == "__main__":
     # Example usage and testing
     import numpy as np
